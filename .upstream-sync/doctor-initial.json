@@ -1,0 +1,200 @@
+{
+  "schema_version": 1,
+  "status": "NG",
+  "generated_at_utc": "2026-09-01T09:11:41.330143+00:00",
+  "repo_root": "/home/c00880099/slime-ascend-v0.3.2",
+  "skill_root": "/home/c00880099/slime-ascend-v0.3.1/.agents/skills/slime-upstream-sync",
+  "platform": {
+    "system": "Linux",
+    "release": "5.10.0-60.18.0.50.oe2203.x86_64"
+  },
+  "commands": {
+    "python": {
+      "available": true,
+      "path": "/home/c00880099/venvs/slime-ascend-v0.3.2/bin/python",
+      "version": "Python 3.11.15",
+      "timed_out": false
+    },
+    "git": {
+      "available": true,
+      "path": "/usr/bin/git",
+      "version": "git version 2.34.1",
+      "timed_out": false
+    },
+    "bash": {
+      "available": true,
+      "path": "/usr/bin/bash",
+      "version": "GNU bash, version 5.1.16(1)-release (x86_64-pc-linux-gnu)",
+      "timed_out": false
+    },
+    "codex": {
+      "available": true,
+      "path": "/root/.local/bin/codex",
+      "version": "codex-cli 0.150.1",
+      "timed_out": false
+    }
+  },
+  "child_skills": {
+    "gpu-to-npu-test-converter": {
+      "path": "/home/c00880099/slime-ascend-v0.3.1/.agents/skills/gpu-to-npu-test-converter/SKILL.md",
+      "sha256": "00a81a5b673d87730cb3bc8b94b441e1e8b977ce5a0ac47972389ca7ffd1b653"
+    },
+    "npu-test-autofix": {
+      "path": "/home/c00880099/slime-ascend-v0.3.1/.agents/skills/npu-test-autofix/SKILL.md",
+      "sha256": "c826a72ba78c99751ff5c464573b973e42d7634e7fcc27c35a4495d824700811"
+    }
+  },
+  "assets": {
+    "SLIME_TEST_HF_WEIGHTS_ROOT": {
+      "configured": false,
+      "path": null
+    },
+    "SLIME_TEST_DATASETS_ROOT": {
+      "configured": false,
+      "path": null
+    },
+    "SLIME_TEST_MEGATRON_WEIGHTS_ROOT": {
+      "configured": false,
+      "path": null
+    }
+  },
+  "dependencies": {
+    "error": "missing assignments in /home/c00880099/slime-ascend-v0.3.2/scripts/quick_install.sh: CANN_VERSION, MBRIDGE_COMMIT, MEGATRON_ADAPTOR_COMMIT, MEGATRON_BRIDGE_COMMIT, MEMFABRIC_HYBRID_VERSION, SGLANG_COMMIT, SGLANG_ROUTER_WHEEL, SGL_KERNEL_NPU_FIX_COMMIT, SGL_KERNEL_NPU_VERSION, SGL_KERNEL_NPU_WHEEL_VERSION, TRANSFORMER_ENGINE_NPU_COMMIT"
+  },
+  "component_inventory": {},
+  "environment_presence": {
+    "HTTP_PROXY": true,
+    "HTTPS_PROXY": true,
+    "NO_PROXY": true,
+    "SSL_CERT_FILE": false
+  },
+  "checks": [
+    {
+      "name": "platform_linux",
+      "passed": true,
+      "required": true,
+      "detail": "Linux-5.10.0-60.18.0.50.oe2203.x86_64-x86_64-with-glibc2.35"
+    },
+    {
+      "name": "command_python",
+      "passed": true,
+      "required": true,
+      "detail": "Python 3.11.15"
+    },
+    {
+      "name": "command_git",
+      "passed": true,
+      "required": true,
+      "detail": "git version 2.34.1"
+    },
+    {
+      "name": "command_bash",
+      "passed": true,
+      "required": true,
+      "detail": "GNU bash, version 5.1.16(1)-release (x86_64-pc-linux-gnu)"
+    },
+    {
+      "name": "command_codex",
+      "passed": true,
+      "required": true,
+      "detail": "codex-cli 0.150.1"
+    },
+    {
+      "name": "repo_root",
+      "passed": true,
+      "required": true,
+      "detail": "/home/c00880099/slime-ascend-v0.3.2"
+    },
+    {
+      "name": "state_dir_writable",
+      "passed": true,
+      "required": true,
+      "detail": "/home/c00880099/slime-ascend-v0.3.2/.upstream-sync/state"
+    },
+    {
+      "name": "work_root_writable",
+      "passed": true,
+      "required": true,
+      "detail": "/home/c00880099/slime-ascend-v0.3.2/.upstream-sync/work"
+    },
+    {
+      "name": "skill_gpu-to-npu-test-converter",
+      "passed": true,
+      "required": true,
+      "detail": "/home/c00880099/slime-ascend-v0.3.1/.agents/skills/gpu-to-npu-test-converter/SKILL.md"
+    },
+    {
+      "name": "skill_npu-test-autofix",
+      "passed": true,
+      "required": true,
+      "detail": "/home/c00880099/slime-ascend-v0.3.1/.agents/skills/npu-test-autofix/SKILL.md"
+    },
+    {
+      "name": "runtime_run_sync.py",
+      "passed": true,
+      "required": true,
+      "detail": "/home/c00880099/slime-ascend-v0.3.1/.agents/skills/slime-upstream-sync/scripts/run_sync.py"
+    },
+    {
+      "name": "runtime_collect_change_assessment.py",
+      "passed": true,
+      "required": true,
+      "detail": "/home/c00880099/slime-ascend-v0.3.1/.agents/skills/slime-upstream-sync/scripts/collect_change_assessment.py"
+    },
+    {
+      "name": "runtime_materialize_overlay.sh",
+      "passed": true,
+      "required": true,
+      "detail": "/home/c00880099/slime-ascend-v0.3.1/.agents/skills/slime-upstream-sync/scripts/materialize_overlay.sh"
+    },
+    {
+      "name": "runtime_finalize_overlay.sh",
+      "passed": true,
+      "required": true,
+      "detail": "/home/c00880099/slime-ascend-v0.3.1/.agents/skills/slime-upstream-sync/scripts/finalize_overlay.sh"
+    },
+    {
+      "name": "runtime_agent_prompt.md",
+      "passed": true,
+      "required": true,
+      "detail": "/home/c00880099/slime-ascend-v0.3.1/.agents/skills/slime-upstream-sync/references/agent_prompt.md"
+    },
+    {
+      "name": "dependency_contract",
+      "passed": false,
+      "required": true,
+      "detail": "missing assignments in /home/c00880099/slime-ascend-v0.3.2/scripts/quick_install.sh: CANN_VERSION, MBRIDGE_COMMIT, MEGATRON_ADAPTOR_COMMIT, MEGATRON_BRIDGE_COMMIT, MEMFABRIC_HYBRID_VERSION, SGLANG_COMMIT, SGLANG_ROUTER_WHEEL, SGL_KERNEL_NPU_FIX_COMMIT, SGL_KERNEL_NPU_VERSION, SGL_KERNEL_NPU_WHEEL_VERSION, TRANSFORMER_ENGINE_NPU_COMMIT"
+    },
+    {
+      "name": "npu_smi",
+      "passed": true,
+      "required": true,
+      "detail": "+------------------------------------------------------------------------------------------------------------------+"
+    },
+    {
+      "name": "python_torch_npu",
+      "passed": true,
+      "required": true,
+      "detail": "importable"
+    },
+    {
+      "name": "asset_SLIME_TEST_HF_WEIGHTS_ROOT",
+      "passed": false,
+      "required": false,
+      "detail": "not configured"
+    },
+    {
+      "name": "asset_SLIME_TEST_DATASETS_ROOT",
+      "passed": false,
+      "required": false,
+      "detail": "not configured"
+    },
+    {
+      "name": "asset_SLIME_TEST_MEGATRON_WEIGHTS_ROOT",
+      "passed": false,
+      "required": false,
+      "detail": "not configured"
+    }
+  ],
+  "failure_count": 1
+}

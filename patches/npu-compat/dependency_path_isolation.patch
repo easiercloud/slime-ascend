@@ -1,0 +1,38 @@
+diff --git a/slime/utils/external_utils/command_utils.py b/slime/utils/external_utils/command_utils.py
+--- a/slime/utils/external_utils/command_utils.py
++++ b/slime/utils/external_utils/command_utils.py
+@@ -15,6 +15,24 @@ _ = exec_command, dataclass_cli
+ repo_base_dir = Path(os.path.abspath(__file__)).resolve().parents[3]
+ 
+ 
++def _dependency_pythonpath() -> str:
++    """Return explicit dependency roots while preserving legacy container defaults."""
++    dependency_paths = [
++        os.environ.get("SLIME_MEGATRON_ROOT", "/workspace/Megatron-LM"),
++        os.path.join(
++            os.environ.get("SLIME_MEGATRON_BRIDGE_ROOT", "/workspace/Megatron-Bridge"),
++            "src",
++        ),
++        os.environ.get("SLIME_MEGATRON_ADAPTOR_ROOT", "/workspace/MegatronAdaptor"),
++        os.environ.get("SLIME_TRANSFORMER_ENGINE_NPU_ROOT", "/workspace/TransformerEngineNPU"),
++    ]
++    inherited = os.environ.get("PYTHONPATH", "")
++    if inherited:
++        dependency_paths.append(inherited)
++    return ":".join(dependency_paths)
++
++
+ def convert_checkpoint(
+@@ -53,7 +71,7 @@ def convert_checkpoint(
+ 
+     exec_command(
+         f"source {repo_base_dir}/scripts/models/{megatron_model_type}.sh && "
+-        f"PYTHONPATH=/workspace/Megatron-LM:/workspace/Megatron-Bridge/src:/workspace/MegatronAdaptor:/workspace/TransformerEngineNPU:$PYTHONPATH "
++        f"PYTHONPATH={_dependency_pythonpath()} "
+         f"torchrun "
+@@ -149,7 +167,7 @@ def execute_train(
+         {
+             "env_vars": {
+-                "PYTHONPATH": f"/workspace/Megatron-LM:/workspace/Megatron-Bridge/src:/workspace/MegatronAdaptor:/workspace/TransformerEngineNPU:{os.environ.get('PYTHONPATH', '')}",
++                "PYTHONPATH": _dependency_pythonpath(),
+                 "SLIME_ENABLE_PROFILING": "False",
