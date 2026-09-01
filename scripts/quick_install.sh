@@ -7,7 +7,7 @@ NPU_DEVICE=${NPU_DEVICE:=A3}
 CANN_VERSION=9.0.0
 SGLANG_COMMIT=0.5.15.post1
 SGLANG_BASE_COMMIT=0b3bb0cbe31873994c9f989fddfe2f87ca839fdd
-SGLANG_ROUTER_WHEEL=https://github.com/zhuzilin/sgl-router/releases/download/v0.3.2-9daabcd/sglang_router-0.3.2-cp38-abi3-manylinux_2_28_x86_64.whl
+SGLANG_ROUTER_PACKAGE=sglang-router==0.3.2
 # SGLang v0.5.15.post1's NPU CI pins this exact release.
 SGL_KERNEL_NPU_VERSION=2026.6.2
 # 2026.6.2 release 内 sgl_kernel_npu wheel 的 metadata 尚为 2026.6.1。
@@ -38,8 +38,8 @@ cd ..
 echo "2. install torch & torch_npu & other basic packages"
 pip install torch==2.10.0 torch_npu==2.10.0.post4 torchvision==0.25.0 setuptools==81.0.0
 pip install "memfabric-hybrid==${MEMFABRIC_HYBRID_VERSION}"
-pip install "${SGLANG_ROUTER_WHEEL}" --force-reinstall
-python -c "import sglang_router; assert 'slime' in sglang_router.__version__"
+pip install "${SGLANG_ROUTER_PACKAGE}" --force-reinstall
+python -c "import sglang_router"
 
 echo "3.install sgl-kernel-npu from release whl"
 KERNEL_ARCH=$(uname -m)
