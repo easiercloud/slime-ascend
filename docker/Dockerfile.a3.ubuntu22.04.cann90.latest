@@ -59,6 +59,10 @@ RUN git config --global user.email "temp@example.com" && \
 # 构建上下文为仓库根目录：docker build -f docker/Dockerfile.a3.ubuntu22.04.cann90.latest .
 COPY . /workspace/slime-ascend
 
+# The outer repository is a wrapper; install the Python project from the
+# official Slime submodule rather than from /workspace/slime-ascend itself.
+RUN cd /workspace/slime-ascend/slime && pip install -e .
+
 # 1. 安装 SGLang
 RUN git clone https://github.com/sgl-project/sglang.git /workspace/sglang && \
     cd /workspace/sglang && \

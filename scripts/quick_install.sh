@@ -104,8 +104,10 @@ pip uninstall triton triton_ascend -y
 pip install triton_ascend==3.2.1
 
 echo "7. install slime-ascend"
-cd slime-ascend/
-pip install -e . 
+# The outer repository is a patch/packaging wrapper; the Python project lives
+# in its official Slime submodule.
+cd slime-ascend/slime/
+pip install -e .
 
 echo "8. apply npu patches"
 cd ../sglang
@@ -121,7 +123,7 @@ cd ../TransformerEngineNPU/
 git am ../slime-ascend/patches/third_party/transformer_engine_npu/*
 # Slime v0.3.2 当前没有 MegatronAdaptor 补丁条目。
 echo "9. return to slime-ascend directory"
-cd ../slime-ascend/
+cd ..
 
 echo "9. build slime"
 bash build.sh
