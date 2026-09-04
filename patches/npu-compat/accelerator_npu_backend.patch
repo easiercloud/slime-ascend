@@ -1,8 +1,19 @@
+From 85058112035a01d71e5abebb5906333d517fd670 Mon Sep 17 00:00:00 2001
+From: slime-ascend <slime-ascend@local>
+Date: Fri, 4 Sep 2026 07:45:34 +0000
+Subject: [PATCH] [Ascend] add NPU accelerator backend
+
+---
+ slime/utils/accelerator/npu.py | 82 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 82 insertions(+)
+ create mode 100644 slime/utils/accelerator/npu.py
+
 diff --git a/slime/utils/accelerator/npu.py b/slime/utils/accelerator/npu.py
 new file mode 100644
+index 00000000..ff691e78
 --- /dev/null
 +++ b/slime/utils/accelerator/npu.py
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,82 @@
 +"""Ascend NPU accelerator implementation."""
 +
 +from __future__ import annotations
@@ -69,13 +80,12 @@ new file mode 100644
 +        return None
 +
 +    def empty_cache(self) -> None:
-+        """Avoid allocator cache destruction while an NPU graph is captured.
-+
-+        Ascend raises ``captures_underway.empty()`` when ``empty_cache`` is
-+        called during graph capture. Weight-update paths still synchronize and
-+        perform IPC cleanup; cache destruction is only an optimization.
-+        """
-+        return None
++        """Release cached NPU memory unless the current stream is capturing a graph."""
++        module = self._module()
++        is_capturing = getattr(module, "is_current_stream_capturing", None)
++        if is_capturing is not None and is_capturing():
++            return
++        module.empty_cache()
 +
 +    def supports(self, capability: str) -> bool:
 +        if capability in {"nvml_affinity", "cuda_int4_extension", "sglang_fp8_utils", "triton_kernels"}:
@@ -86,4 +96,6 @@ new file mode 100644
 +            checker = getattr(self._module(), "is_bf16_supported", None)
 +            return bool(checker and checker())
 +        return super().supports(capability)
+-- 
+2.34.1
 

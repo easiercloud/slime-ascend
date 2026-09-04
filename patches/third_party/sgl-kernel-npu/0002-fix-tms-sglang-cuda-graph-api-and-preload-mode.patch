@@ -1,3 +1,13 @@
+From 3e6fe1dd318544782213caadc1724a5069b79288 Mon Sep 17 00:00:00 2001
+From: gcw_8jFUVqc5 <caowuke@huawei.com>
+Date: Fri, 4 Sep 2026 08:11:16 +0000
+Subject: [PATCH] align TMS graph API and preload mode
+
+---
+ .../python/torch_memory_saver/entrypoint.py           |  9 ++++++++-
+ .../python/torch_memory_saver/hooks/mode_preload.py   | 11 ++++++-----
+ 2 files changed, 14 insertions(+), 6 deletions(-)
+
 diff --git a/contrib/torch_memory_saver/python/torch_memory_saver/entrypoint.py b/contrib/torch_memory_saver/python/torch_memory_saver/entrypoint.py
 index b14c561..9066a40 100644
 --- a/contrib/torch_memory_saver/python/torch_memory_saver/entrypoint.py
@@ -61,3 +71,6 @@ index e4f3135..8bddc9f 100644
  
  
  @contextmanager
+-- 
+2.34.1
+

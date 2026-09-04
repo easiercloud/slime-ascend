@@ -1,3 +1,12 @@
+From 44b8761f000390eb3c05252f5280ec529317c0f7 Mon Sep 17 00:00:00 2001
+From: gcw_8jFUVqc5 <caowuke@huawei.com>
+Date: Fri, 4 Sep 2026 08:12:39 +0000
+Subject: [PATCH] [Ascend] forward TMS graph arguments
+
+---
+ python/sglang/srt/utils/torch_memory_saver_adapter.py | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
 diff --git a/python/sglang/srt/utils/torch_memory_saver_adapter.py b/python/sglang/srt/utils/torch_memory_saver_adapter.py
 index ad98e59283..20a653dad4 100644
 --- a/python/sglang/srt/utils/torch_memory_saver_adapter.py
@@ -31,3 +40,6 @@ index ad98e59283..20a653dad4 100644
          yield
  
      @contextmanager
+-- 
+2.34.1
+

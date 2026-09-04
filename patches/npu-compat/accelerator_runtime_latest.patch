@@ -1,13 +1,26 @@
+From 5725b70efc1b978af0db940b6474d2d36dec424a Mon Sep 17 00:00:00 2001
+From: slime-ascend <slime-ascend@local>
+Date: Fri, 4 Sep 2026 07:45:57 +0000
+Subject: [PATCH] [Ascend] adapt runtime scheduling and memory handling for NPU
+
+---
+ slime/backends/megatron_utils/__init__.py   |  4 ++-
+ slime/backends/sglang_utils/engine_group.py |  3 +-
+ slime/ray/actor_group.py                    |  5 +--
+ slime/ray/placement_group.py                | 18 ++++++----
+ slime/ray/train_actor.py                    |  6 +++-
+ slime/utils/accelerator/__init__.py         | 22 ++++++++++++
+ slime/utils/accelerator/base.py             |  1 +
+ slime/utils/accelerator/cuda.py             |  8 ++++-
+ slime/utils/external_utils/command_utils.py | 37 ++++++++++++++++++---
+ slime/utils/memory_utils.py                 |  2 +-
+ 10 files changed, 87 insertions(+), 19 deletions(-)
+
 diff --git a/slime/backends/megatron_utils/__init__.py b/slime/backends/megatron_utils/__init__.py
-index 55372a86..405dbb06 100644
+index 55372a86..4dea1708 100644
 --- a/slime/backends/megatron_utils/__init__.py
 +++ b/slime/backends/megatron_utils/__init__.py
-@@ -1,15 +1,32 @@
-+import ctypes
- import logging
-+from pathlib import Path
- 
- import torch
+@@ -4,7 +4,9 @@ import torch
  
  from slime.utils import accelerator
  
@@ -18,24 +31,6 @@ index 55372a86..405dbb06 100644
  
  try:
      import deep_ep
-     from torch_memory_saver import torch_memory_saver
- 
-+    if (
-+        selected_accelerator is not None
-+        and selected_accelerator.device_type == "npu"
-+        and getattr(deep_ep, "__file__", None)
-+    ):
-+        deep_ep_opapi = (
-+            Path(deep_ep.__file__).resolve().parent
-+            / "vendors/hwcomputing/op_api/lib/libcust_opapi.so"
-+        )
-+        if not deep_ep_opapi.exists():
-+            raise ImportError(f"Cannot find DeepEP custom operator library: {deep_ep_opapi}")
-+        _deep_ep_opapi_handle = ctypes.CDLL(str(deep_ep_opapi), mode=ctypes.RTLD_GLOBAL)
-+
-     old_init = deep_ep.Buffer.__init__
- 
-     def new_init(self, *args, **kwargs):
 diff --git a/slime/backends/sglang_utils/engine_group.py b/slime/backends/sglang_utils/engine_group.py
 index 61863bff..fb09d1f8 100644
 --- a/slime/backends/sglang_utils/engine_group.py
@@ -57,32 +52,6 @@ index 61863bff..fb09d1f8 100644
                  scheduling_strategy=scheduling_strategy,
                  runtime_env={
                      "env_vars": add_default_ray_env_vars(env_vars),
-diff --git a/slime/backends/sglang_utils/sglang_engine.py b/slime/backends/sglang_utils/sglang_engine.py
-index 66e1828b..97b69925 100644
---- a/slime/backends/sglang_utils/sglang_engine.py
-+++ b/slime/backends/sglang_utils/sglang_engine.py
-@@ -18,6 +18,12 @@ from slime.utils.http_utils import get_host_info
- logger = logging.getLogger(__name__)
- 
- 
-+def _enable_memory_saver(args) -> bool:
-+    if accelerator.device_type() == "npu" and os.environ.get("SLIME_NPU_ENABLE_SGLANG_MEMORY_SAVER", "0") != "1":
-+        return False
-+    return args.offload_rollout
-+
-+
- def get_base_gpu_id(args, rank):
-     num_gpus = min(args.num_gpus_per_node, args.rollout_num_gpus_per_engine)
-     if args.colocate:
-@@ -529,7 +535,7 @@ def _compute_server_args(
-         "trust_remote_code": True,
-         "random_seed": args.seed + rank * args.num_gpus_per_node,
-         # memory
--        "enable_memory_saver": args.offload_rollout,
-+        "enable_memory_saver": _enable_memory_saver(args),
-         # distributed
-         "host": host,
-         "port": port,
 diff --git a/slime/ray/actor_group.py b/slime/ray/actor_group.py
 index 02ccff6b..a59fc8b6 100644
 --- a/slime/ray/actor_group.py
@@ -383,4 +352,6 @@ index 4bad36b5..397a1ff8 100644
          torch._C._host_emptyCache()
  
  
+-- 
+2.34.1
 

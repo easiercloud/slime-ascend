@@ -1,7 +1,18 @@
+From 3727fea3fa0b661e85c5283c26c37ea66d9137cf Mon Sep 17 00:00:00 2001
+From: slime-ascend <slime-ascend@local>
+Date: Fri, 4 Sep 2026 07:45:57 +0000
+Subject: [PATCH] [Ascend] isolate dependency paths for checkpoint and Ray
+ workers
+
+---
+ slime/utils/external_utils/command_utils.py | 21 +++++++++++++++++++--
+ 1 file changed, 19 insertions(+), 2 deletions(-)
+
 diff --git a/slime/utils/external_utils/command_utils.py b/slime/utils/external_utils/command_utils.py
+index 7391753b..3e22a9a4 100644
 --- a/slime/utils/external_utils/command_utils.py
 +++ b/slime/utils/external_utils/command_utils.py
-@@ -15,6 +15,24 @@ _ = exec_command, dataclass_cli
+@@ -19,6 +19,23 @@ _ = exec_command, dataclass_cli
  repo_base_dir = Path(os.path.abspath(__file__)).resolve().parents[3]
  
  
@@ -23,16 +34,26 @@ diff --git a/slime/utils/external_utils/command_utils.py b/slime/utils/external_
 +
 +
  def convert_checkpoint(
-@@ -53,7 +71,7 @@ def convert_checkpoint(
+     model_name,
+     megatron_model_type,
+@@ -53,7 +70,7 @@ def convert_checkpoint(
  
      exec_command(
          f"source {repo_base_dir}/scripts/models/{megatron_model_type}.sh && "
 -        f"PYTHONPATH=/workspace/Megatron-LM:/workspace/Megatron-Bridge/src:/workspace/MegatronAdaptor:/workspace/TransformerEngineNPU:$PYTHONPATH "
 +        f"PYTHONPATH={_dependency_pythonpath()} "
          f"torchrun "
-@@ -149,7 +167,7 @@ def execute_train(
+         f"--nproc-per-node {num_gpus_per_node} "
+         f"{multinode_args}"
+@@ -149,7 +166,7 @@ def execute_train(
+     runtime_env_json = json.dumps(
          {
              "env_vars": {
 -                "PYTHONPATH": f"/workspace/Megatron-LM:/workspace/Megatron-Bridge/src:/workspace/MegatronAdaptor:/workspace/TransformerEngineNPU:{os.environ.get('PYTHONPATH', '')}",
 +                "PYTHONPATH": _dependency_pythonpath(),
                  "SLIME_ENABLE_PROFILING": "False",
+                 "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+                 "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",
+-- 
+2.34.1
+

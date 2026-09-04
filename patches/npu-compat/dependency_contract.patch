@@ -1,5 +1,30 @@
+From 70921f93b2deb29f395e5d7b36ae66b0bee6cfdc Mon Sep 17 00:00:00 2001
+From: gcw_8jFUVqc5 <caowuke@huawei.com>
+Date: Fri, 4 Sep 2026 08:16:26 +0000
+Subject: [PATCH] [Ascend] pin v0.3.2 dependency contract
+
+---
+ build_conda.sh    |  4 ++--
+ docker/Dockerfile | 12 ++++++++++--
+ 2 files changed, 12 insertions(+), 4 deletions(-)
+
+diff --git a/build_conda.sh b/build_conda.sh
+index 3fa1f584..abad05c6 100644
+--- a/build_conda.sh
++++ b/build_conda.sh
+@@ -148,8 +148,8 @@ export TMS_CUDA_MAJOR
+ pip install -v git+https://github.com/zhuzilin/torch_memory_saver.git@${TMS_COMMIT} \
+   --no-cache-dir --force-reinstall --no-build-isolation
+ pip install "nvidia-modelopt[torch]>=0.37.0" --no-build-isolation
+-pip install https://github.com/zhuzilin/sgl-router/releases/download/v0.3.2-9daabcd/sglang_router-0.3.2-cp38-abi3-manylinux_2_28_x86_64.whl --force-reinstall
+-python -c "import sglang_router; assert 'slime' in sglang_router.__version__"
++pip install sglang-router==0.3.2 --force-reinstall
++python -c "import sglang_router"
+ 
+ # megatron
+ cd $BASE_DIR
 diff --git a/docker/Dockerfile b/docker/Dockerfile
-index 142d9df8..f8e417f2 100644
+index 142d9df8..2094cc1c 100644
 --- a/docker/Dockerfile
 +++ b/docker/Dockerfile
 @@ -4,6 +4,14 @@ FROM slimerl/sglang:${SGLANG_IMAGE_TAG} AS sglang
@@ -17,4 +42,17 @@ index 142d9df8..f8e417f2 100644
  ARG MEGATRON_COMMIT=1dcf0dafa884ad52ffb243625717a3471643e087
  ARG DEEPGEMM_COMMIT=b38a77cd193cf38f670caae192310521d24343be
  ARG DEEPEP_COMMIT=6845ffd9d59126ec0030c13e0e155935a61e5b5a
+@@ -108,8 +116,8 @@ RUN pip install --ignore-installed PyJWT && \
+ # Pin both packages together so downgrading NumPy does not leave an incompatible SciPy.
+ RUN pip install "numpy==1.26.4" "scipy==1.17.1"
+ 
+-RUN pip install https://github.com/zhuzilin/sgl-router/releases/download/v0.3.2-9daabcd/sglang_router-0.3.2-cp38-abi3-manylinux_2_28_x86_64.whl --force-reinstall
+-RUN python -c "import sglang_router; assert 'slime' in sglang_router.__version__"
++RUN pip install sglang-router==0.3.2 --force-reinstall
++RUN python -c "import sglang_router"
+ 
+ RUN rm -rf /root/.cache/pip /root/flash-attention
+ 
+-- 
+2.34.1
 

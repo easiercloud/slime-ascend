@@ -1,6 +1,16 @@
+From c9ca8be69980579a049e06217c6816a311d08d28 Mon Sep 17 00:00:00 2001
+From: slime-ascend <slime-ascend@local>
+Date: Fri, 4 Sep 2026 08:09:04 +0000
+Subject: [PATCH] [Ascend] add coding-agent Docker sandbox
+
+---
+ examples/coding_agent_rl/docker_sandbox.py | 280 +++++++++++++++++++++
+ 1 file changed, 280 insertions(+)
+ create mode 100644 examples/coding_agent_rl/docker_sandbox.py
+
 diff --git a/examples/coding_agent_rl/docker_sandbox.py b/examples/coding_agent_rl/docker_sandbox.py
 new file mode 100644
-index 00000000..d79cd0ab
+index 00000000..2886521b
 --- /dev/null
 +++ b/examples/coding_agent_rl/docker_sandbox.py
 @@ -0,0 +1,280 @@
@@ -284,3 +294,6 @@ index 00000000..d79cd0ab
 +if __name__ == "__main__":
 +    logging.basicConfig(level=logging.INFO)
 +    asyncio.run(_smoke_test())
+-- 
+2.34.1
+
