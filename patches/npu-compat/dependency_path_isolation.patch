@@ -1,59 +1,39 @@
-From 3727fea3fa0b661e85c5283c26c37ea66d9137cf Mon Sep 17 00:00:00 2001
+From 2c37680e0215f2cd8eb268f53f6215f88d69cd5e Mon Sep 17 00:00:00 2001
 From: slime-ascend <slime-ascend@local>
 Date: Fri, 4 Sep 2026 07:45:57 +0000
-Subject: [PATCH] [Ascend] isolate dependency paths for checkpoint and Ray
- workers
+Subject: [PATCH] isolate dependency paths for checkpoint and Ray workers
 
 ---
- slime/utils/external_utils/command_utils.py | 21 +++++++++++++++++++--
- 1 file changed, 19 insertions(+), 2 deletions(-)
+ slime/utils/external_utils/command_utils.py | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
 
 diff --git a/slime/utils/external_utils/command_utils.py b/slime/utils/external_utils/command_utils.py
-index 7391753b..3e22a9a4 100644
+index a0b98a10..ecc718bf 100644
 --- a/slime/utils/external_utils/command_utils.py
 +++ b/slime/utils/external_utils/command_utils.py
-@@ -19,6 +19,23 @@ _ = exec_command, dataclass_cli
- repo_base_dir = Path(os.path.abspath(__file__)).resolve().parents[3]
- 
- 
-+def _dependency_pythonpath() -> str:
-+    """Return explicit dependency roots while preserving legacy container defaults."""
-+    dependency_paths = [
-+        os.environ.get("SLIME_MEGATRON_ROOT", "/workspace/Megatron-LM"),
-+        os.path.join(
-+            os.environ.get("SLIME_MEGATRON_BRIDGE_ROOT", "/workspace/Megatron-Bridge"),
-+            "src",
-+        ),
-+        os.environ.get("SLIME_MEGATRON_ADAPTOR_ROOT", "/workspace/MegatronAdaptor"),
-+        os.environ.get("SLIME_TRANSFORMER_ENGINE_NPU_ROOT", "/workspace/TransformerEngineNPU"),
-+    ]
-+    inherited = os.environ.get("PYTHONPATH", "")
-+    if inherited:
-+        dependency_paths.append(inherited)
-+    return ":".join(dependency_paths)
-+
-+
- def convert_checkpoint(
-     model_name,
-     megatron_model_type,
-@@ -53,7 +70,7 @@ def convert_checkpoint(
+@@ -52,7 +52,7 @@ def convert_checkpoint(
  
      exec_command(
          f"source {repo_base_dir}/scripts/models/{megatron_model_type}.sh && "
--        f"PYTHONPATH=/workspace/Megatron-LM:/workspace/Megatron-Bridge/src:/workspace/MegatronAdaptor:/workspace/TransformerEngineNPU:$PYTHONPATH "
-+        f"PYTHONPATH={_dependency_pythonpath()} "
+-        f"PYTHONPATH={repo_base_dir}:/root/Megatron-LM:${{PYTHONPATH:-}} "
++        f"PYTHONPATH=path/to/Megatron-LM:path/to/Megatron-Bridge/src:path/to/MegatronAdaptor:path/to/TransformerEngineNPU:$PYTHONPATH "
          f"torchrun "
          f"--nproc-per-node {num_gpus_per_node} "
          f"{multinode_args}"
-@@ -149,7 +166,7 @@ def execute_train(
+@@ -137,8 +137,12 @@ def execute_train(
      runtime_env_json = json.dumps(
          {
              "env_vars": {
--                "PYTHONPATH": f"/workspace/Megatron-LM:/workspace/Megatron-Bridge/src:/workspace/MegatronAdaptor:/workspace/TransformerEngineNPU:{os.environ.get('PYTHONPATH', '')}",
-+                "PYTHONPATH": _dependency_pythonpath(),
-                 "SLIME_ENABLE_PROFILING": "False",
-                 "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
-                 "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",
+-                "PYTHONPATH": "/root/Megatron-LM/",
++                "PYTHONPATH": "path/to/Megatron-LM:path/to/Megatron-Bridge/src:path/to/MegatronAdaptor:path/to/TransformerEngineNPU:$PYTHONPATH",
+                 "RAY_USE_UVLOOP": "0",
++                "SLIME_ENABLE_PROFILING": "False",
++                "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
++                "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",
++                "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                 "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+                 "NCCL_NVLS_ENABLE": str(int(check_has_nvlink())),
+                 "no_proxy": f"127.0.0.1,{master_addr}",
 -- 
 2.34.1
 

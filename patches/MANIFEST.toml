@@ -41,17 +41,7 @@ file = "dependency_path_isolation.patch"
 summary = "允许 checkpoint 与 Ray worker 显式选择 v0.3.2 独立依赖根目录，避免回落到共享 /workspace checkout"
 issue = "SLIME-V032-012"
 base_commit = "3778dbf6d1a533ab478ecf5ddaa11449a47752b2"
-sha256 = "48c51326afca8852d2fd7bed729df9f0d529e8103d5dc5f8dcf58e8184cfc221"
-
-[[patches]]
-id = "slime:dependency:contract-v032"
-category = "npu-compat"
-target = "slime"
-file = "dependency_contract.patch"
-summary = "记录 SGLang v0.5.15.post1、Megatron 1dcf0daf、匹配的 MA/TENPU 与 PyPI sglang-router 0.3.2 依赖"
-issue = "SLIME-V032-005"
-base_commit = "3778dbf6d1a533ab478ecf5ddaa11449a47752b2"
-sha256 = "ef8df37bf9e70f9f61e6dd088922bc946aaabfcec69498312394e6aa5f6f476e"
+sha256 = "b92c9ea4231d08f9a8825624b66d4a732ad692c4ef3f640e2d1802d983171b9a"
 
 [[patches]]
 id = "slime:upstream-fix:thd-packed-cp-tp"
