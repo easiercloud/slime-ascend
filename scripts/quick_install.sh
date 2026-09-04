@@ -2,6 +2,9 @@
 set -euxo pipefail
 CANN_INSTALL_PATH=${CANN_INSTALL_PATH:-"/usr/local/Ascend"}
 NPU_DEVICE=${NPU_DEVICE:=A3}
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
+DEPS_ROOT=${SLIME_ASCEND_DEPS_ROOT:-"$(dirname "${REPO_ROOT}")"}
 
 # Pinned dependency contract for Slime v0.3.2 / Ascend validation.
 CANN_VERSION=9.0.0
@@ -19,17 +22,19 @@ MEGATRON_COMMIT=1dcf0dafa
 MBRIDGE_COMMIT=89eb10887887bc74853f89a4de258c0702932a1c
 MEGATRON_ADAPTOR_COMMIT=f707a3b6eb9981532c3419c08ea40a8bb5962af5
 MEGATRON_BRIDGE_COMMIT=35b4ebfc486fb15dcc0273ceea804c3606be948a
-TRANSFORMER_ENGINE_NPU_COMMIT=47d604491f2fb6f284fa470352b127ca20e5eaea
+TRANSFORMER_ENGINE_NPU_COMMIT=2b8529f94c3fd10497bf772bdc5b448b7ed4659a
 MegatronAdaptor_COMMIT=${MEGATRON_ADAPTOR_COMMIT}
 TransformerEngineNPU_COMMIT=${TRANSFORMER_ENGINE_NPU_COMMIT}
 source ${CANN_INSTALL_PATH}/ascend-toolkit/set_env.sh
 source ${CANN_INSTALL_PATH}/nnal/atb/set_env.sh
+cd "${DEPS_ROOT}"
 
 echo "1. install SGLang from source"
 git clone https://github.com/sgl-project/sglang.git
 cd sglang
 git checkout v${SGLANG_COMMIT}
 test "$(git rev-parse HEAD)" = "${SGLANG_BASE_COMMIT}"
+git am "${REPO_ROOT}"/patches/third_party/sglang/*
 mv python/pyproject.toml python/pyproject.toml.backup
 mv python/pyproject_npu.toml python/pyproject.toml
 pip install -e python[all_npu]
@@ -70,8 +75,8 @@ echo "3.1 rebuild torch-memory-saver with the registered lifecycle patch"
 git clone https://github.com/sgl-project/sgl-kernel-npu.git sgl-kernel-npu-src
 cd sgl-kernel-npu-src
 git checkout ${SGL_KERNEL_NPU_FIX_COMMIT}
-git apply ../slime-ascend/patches/third_party/sgl-kernel-npu/0001-fix-torch-memory-saver-allocation-lifecycle.patch
-git apply ../slime-ascend/patches/third_party/sgl-kernel-npu/0002-fix-tms-sglang-cuda-graph-api-and-preload-mode.patch
+git am "${REPO_ROOT}"/patches/third_party/sgl-kernel-npu/0001-fix-torch-memory-saver-allocation-lifecycle.patch
+git am "${REPO_ROOT}"/patches/third_party/sgl-kernel-npu/0002-fix-tms-sglang-cuda-graph-api-and-preload-mode.patch
 cd contrib/torch_memory_saver/python
 python3 setup.py clean --all
 python3 setup.py bdist_wheel
@@ -81,14 +86,18 @@ cd ../../../..
 echo "4. install mbridge & Megatron-Bridge"
 git clone https://github.com/ISEEKYAN/mbridge.git 
 cd mbridge && git checkout ${MBRIDGE_COMMIT}
+git am "${REPO_ROOT}"/patches/third_party/mbridge/*
 pip install -e . && cd ..
 
 git clone https://github.com/fzyzcjy/Megatron-Bridge.git
-cd Megatron-Bridge && git checkout ${MEGATRON_BRIDGE_COMMIT} && cd ..
+cd Megatron-Bridge && git checkout ${MEGATRON_BRIDGE_COMMIT}
+git am "${REPO_ROOT}"/patches/third_party/megatron-bridge/*
+cd ..
 pip install "nvidia-modelopt[torch]>=0.37.0" --no-build-isolation
 
 git clone https://github.com/NVIDIA/Megatron-LM.git --recursive && \
 cd Megatron-LM/ && git checkout ${MEGATRON_COMMIT} && \
+git am "${REPO_ROOT}"/patches/third_party/megatron/* && \
 pip install -e . && cd ..
 
 echo "5. install MA&TE"
@@ -104,28 +113,15 @@ pip uninstall triton triton_ascend -y
 pip install triton_ascend==3.2.1
 
 echo "7. install slime-ascend"
-# The outer repository is a patch/packaging wrapper; the Python project lives
-# in its official Slime submodule.
-cd slime-ascend/slime/
+# Keep the submodule on the official v0.3.2 commit and replay the registered
+# format-patch series before installing the Python project.
+cd "${REPO_ROOT}"
+bash build.sh
+cd slime/
 pip install -e .
 
-echo "8. apply npu patches"
-cd ../sglang
-git am ../slime-ascend/patches/third_party/sglang/*
-cd ../Megatron-LM/
-git am ../slime-ascend/patches/third_party/megatron/*
-cd ../Megatron-Bridge/
-git am ../slime-ascend/patches/third_party/megatron-bridge/*
-cd ../mbridge/
-git am ../slime-ascend/patches/third_party/mbridge/*
-# Apply TransformerEngineNPU patches (fixed path - was TransformerEngineNPU, should be transformer_engine_npu)
-cd ../TransformerEngineNPU/
-git am ../slime-ascend/patches/third_party/transformer_engine_npu/*
-# Slime v0.3.2 当前没有 MegatronAdaptor 补丁条目。
-echo "9. return to slime-ascend directory"
-cd ..
-
-echo "9. build slime"
-bash build.sh
+# TENPU 2b8529f 已吸收原 CP/TE patch；MA v0.3.2 当前没有额外补丁。
+echo "8. installation complete"
+cd "${REPO_ROOT}"
 # Create folder to store logs
 mkdir -p logs

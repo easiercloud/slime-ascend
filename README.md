@@ -42,7 +42,7 @@ slime-ascend/
 │   ├── npu-compat/         # NPU 硬件差异适配（永久维护）：设备标识、环境变量、资源分配
 │   ├── upstream-fixes/     # 上游 bug 的临时 workaround（上游修复后删除）
 │   ├── features/           # NPU 侧新增能力
-│   ├── third_party/        # 对依赖组件的补丁（sglang / Megatron-LM / Megatron-Bridge / mbridge / TE-NPU）
+│   ├── third_party/        # 对依赖组件的补丁（sglang / Megatron-LM / Megatron-Bridge / mbridge / sgl-kernel-npu）
 │   └── MANIFEST.toml       # 补丁清单：逐 patch 说明与上游跟踪信息
 └── scripts/              # 安装脚本与运行示例
     ├── quick_install.sh    # 依赖环境安装 + third_party 补丁应用
@@ -69,7 +69,7 @@ cd slime && pip install -e .
 | 选项 | 说明 |
 |---|---|
 | `--clean` | 删除 slime/ 目录后全量重建 |
-| `--skip-submodule` | 跳过 submodule 重置，快速重打补丁（幂等，已应用的补丁自动跳过；也可用于离线构建） |
+| `--skip-submodule` | 跳过 submodule 更新；仅用于已处于官方基线且 worktree clean 的离线回放 |
 | `--dry-run` | 只打印将执行的操作 |
 
 完整的 NPU 环境搭建（Docker / 一键安装脚本 quick_install.sh）与常见问题排查，
