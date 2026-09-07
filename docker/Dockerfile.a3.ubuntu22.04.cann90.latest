@@ -4,6 +4,8 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
+ARG SLIME_ASCEND_REPO=https://gitcode.com/gcw_8jFUVqc5/slime-ascend.git
+ARG SLIME_ASCEND_REF=v0.3.2
 ENV http_proxy=$HTTP_PROXY
 ENV https_proxy=$HTTPS_PROXY
 ENV HTTP_PROXY=$HTTP_PROXY
@@ -55,9 +57,12 @@ RUN ARCH=$(uname -m) && \
 RUN git config --global user.email "temp@example.com" && \
     git config --global user.name "temp"
 
-# 【核心前置】拷贝本仓（含 patches/ 与 build.sh）
-# 构建上下文为仓库根目录：docker build -f docker/Dockerfile.a3.ubuntu22.04.cann90.latest .
-COPY . /workspace/slime-ascend
+# 【核心前置】从私仓获取本仓（含 patches/ 与 build.sh）。
+# 认证由构建机的 Git credential helper 提供，文件中不写访问令牌。
+RUN git clone --branch "${SLIME_ASCEND_REF}" --depth 1 "${SLIME_ASCEND_REPO}" /workspace/slime-ascend && \
+    cd /workspace/slime-ascend && \
+    git submodule update --init --recursive && \
+    test "$(git symbolic-ref --short HEAD)" = "${SLIME_ASCEND_REF}"
 
 # The outer repository is a wrapper; install the Python project from the
 # official Slime submodule rather than from /workspace/slime-ascend itself.
