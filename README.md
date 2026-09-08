@@ -42,7 +42,7 @@ slime-ascend/
 │   ├── npu-compat/         # NPU 硬件差异适配（永久维护）：设备标识、环境变量、资源分配
 │   ├── upstream-fixes/     # 上游 bug 的临时 workaround（上游修复后删除）
 │   ├── features/           # NPU 侧新增能力
-│   ├── third_party/        # 对依赖组件的补丁（sglang / Megatron-LM / Megatron-Bridge / mbridge / sgl-kernel-npu）
+│   ├── third_party/        # 对依赖组件的补丁（sglang / Megatron-LM / Megatron-Bridge / mbridge / TE-NPU）
 │   └── MANIFEST.toml       # 补丁清单：逐 patch 说明与上游跟踪信息
 └── scripts/              # 安装脚本与运行示例
     ├── quick_install.sh    # 依赖环境安装 + third_party 补丁应用
