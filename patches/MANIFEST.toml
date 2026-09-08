@@ -34,16 +34,6 @@ base_commit = "3778dbf6d1a533ab478ecf5ddaa11449a47752b2"
 sha256 = "1a411c0d98c800b3da9a23b672e07225768c2212258d001489ba105f400de926"
 
 [[patches]]
-id = "slime:dependency:path-isolation"
-category = "npu-compat"
-target = "slime"
-file = "dependency_path_isolation.patch"
-summary = "允许 checkpoint 与 Ray worker 显式选择 v0.3.2 独立依赖根目录，避免回落到共享 /workspace checkout"
-issue = "SLIME-V032-012"
-base_commit = "3778dbf6d1a533ab478ecf5ddaa11449a47752b2"
-sha256 = "b92c9ea4231d08f9a8825624b66d4a732ad692c4ef3f640e2d1802d983171b9a"
-
-[[patches]]
 id = "slime:upstream-fix:thd-packed-cp-tp"
 category = "upstream-fixes"
 target = "slime"
