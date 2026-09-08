@@ -2,6 +2,7 @@
 set -euxo pipefail
 CANN_INSTALL_PATH=${CANN_INSTALL_PATH:-"/usr/local/Ascend"}
 NPU_DEVICE=${NPU_DEVICE:=A3}
+python -c 'import sys; assert sys.version_info[:2] == (3, 12), f"Python 3.12 is required, got {sys.version}"'
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 DEPS_ROOT=${SLIME_ASCEND_DEPS_ROOT:-"$(dirname "${REPO_ROOT}")"}
@@ -11,10 +12,8 @@ CANN_VERSION=9.0.0
 SGLANG_COMMIT=0.5.15.post1
 SGLANG_BASE_COMMIT=0b3bb0cbe31873994c9f989fddfe2f87ca839fdd
 SGLANG_ROUTER_PACKAGE=sglang-router==0.3.2
-# SGLang v0.5.15.post1's NPU CI pins this exact release.
-SGL_KERNEL_NPU_VERSION=2026.6.2
-# 2026.6.2 release 内 sgl_kernel_npu wheel 的 metadata 尚为 2026.6.1。
-SGL_KERNEL_NPU_WHEEL_VERSION=2026.6.1
+# Slime v0.3.2 uses the private prebuilt CANN 9.0/Python 3.12 bundle.
+SGL_KERNEL_NPU_CP312_URL=https://gitcode.com/user-attachments/files/9309418/8f72e74ec572428c87831ac6ef340d89.zip
 SGL_KERNEL_NPU_FIX_COMMIT=9765e27532b8f854717eba1d3fb9a0bb97a0c887
 MEMFABRIC_HYBRID_VERSION=1.0.8
 
@@ -46,27 +45,28 @@ pip install "memfabric-hybrid==${MEMFABRIC_HYBRID_VERSION}"
 pip install "${SGLANG_ROUTER_PACKAGE}" --force-reinstall
 python -c "import sglang_router"
 
-echo "3.install sgl-kernel-npu from release whl"
+echo "3.install private CANN 9.0/Python 3.12 sgl-kernel-npu bundle"
 KERNEL_ARCH=$(uname -m)
-case "${KERNEL_ARCH}" in
-    x86_64|aarch64) ;;
-    *) echo "unsupported sgl-kernel-npu architecture: ${KERNEL_ARCH}" >&2; exit 1 ;;
-esac
+if [ "${KERNEL_ARCH}" != "aarch64" ]; then
+    echo "the private cp312 sgl-kernel-npu bundle only provides linux_aarch64 wheels (got ${KERNEL_ARCH})" >&2
+    exit 1
+fi
 case "${NPU_DEVICE}" in
     A3) KERNEL_DEVICE=a3 ;;
     A2) KERNEL_DEVICE=910b ;;
     *) echo "unsupported NPU_DEVICE: ${NPU_DEVICE}" >&2; exit 1 ;;
 esac
-SGL_KERNEL_NPU_URL="https://github.com/sgl-project/sgl-kernel-npu/releases/download/${SGL_KERNEL_NPU_VERSION}/sgl-kernel-npu-${SGL_KERNEL_NPU_VERSION}-torch2.10.0-py311-cann9.0.0-${KERNEL_DEVICE}-${KERNEL_ARCH}.zip"
-wget --no-check-certificate "${SGL_KERNEL_NPU_URL}"
-unzip sgl-kernel-npu*.zip
-pip install torch_memory_saver*.whl
-pip install sgl_kernel_npu*.whl
-pip install deep_ep*.whl
-# For using deep_ep: Link to the deep_ep_cpp.*.so file
-cd "$(pip show deep-ep | grep -E '^Location:' | awk '{print $2}')" && ln -s deep_ep/deep_ep_cpp*.so
-# Avoid "ln -s" failure due to existing deep_ep symlink which breaks "cd -", hence split it out separately.
-cd -
+KERNEL_BUNDLE_TMP=$(mktemp -d)
+wget --no-check-certificate "${SGL_KERNEL_NPU_CP312_URL}" -O "${KERNEL_BUNDLE_TMP}/sgl-kernel-npu-cp312.zip"
+unzip -q "${KERNEL_BUNDLE_TMP}/sgl-kernel-npu-cp312.zip" -d "${KERNEL_BUNDLE_TMP}"
+KERNEL_BUNDLE_DIR="${KERNEL_BUNDLE_TMP}/sgl-kernel-npu-cp312"
+pip install "${KERNEL_BUNDLE_DIR}"/torch_memory_saver-*-cp312-cp312-linux_aarch64.whl \
+    "${KERNEL_BUNDLE_DIR}"/sgl_kernel_npu-*-cp312-cp312-linux_aarch64.whl \
+    "${KERNEL_BUNDLE_DIR}"/deep_ep-*-cp312-cp312-linux_aarch64.whl
+# Link the DeepEP extension from the extracted private bundle.
+SITE=$(python -c 'import site; print(site.getsitepackages()[0])')
+ln -sf "${KERNEL_BUNDLE_DIR}/lib/deep_ep_cpp.cpython-312-aarch64-linux-gnu.so" \
+    "${SITE}/deep_ep_cpp.cpython-312-aarch64-linux-gnu.so"
 
 # (Optional) Confirm whether the import can be successfully
 python -c "import deep_ep; print(deep_ep.__path__)"
