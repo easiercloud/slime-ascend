@@ -1,7 +1,7 @@
 From 420e9932da4f9441d94f74d164e8dc8bd2e62e9b Mon Sep 17 00:00:00 2001
 From: cjy0x <chenjunyi10@huawei.com>
 Date: Tue, 17 Mar 2026 13:09:42 +0800
-Subject: [PATCH] ascend megatron-bridge patch for slime v0.3.1
+Subject: [PATCH] ascend megatron-bridge patch for slime v0.3.2
 
 Signed-off-by: cjy0x <chenjunyi10@huawei.com>
 ---

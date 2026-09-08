@@ -58,14 +58,11 @@ RUN git config --global user.email "temp@example.com" && \
     git config --global user.name "temp"
 
 # 【核心前置】从私仓获取本仓（含 patches/ 与 build.sh）。
-# 认证由构建机的 Git credential helper 提供，文件中不写访问令牌。
 RUN git clone --branch "${SLIME_ASCEND_REF}" --depth 1 "${SLIME_ASCEND_REPO}" /workspace/slime-ascend && \
     cd /workspace/slime-ascend && \
     git submodule update --init --recursive && \
     test "$(git symbolic-ref --short HEAD)" = "${SLIME_ASCEND_REF}"
 
-# The outer repository is a wrapper; install the Python project from the
-# official Slime submodule rather than from /workspace/slime-ascend itself.
 RUN cd /workspace/slime-ascend/slime && pip install -e .
 
 # 1. 安装 SGLang
@@ -149,7 +146,6 @@ RUN pip uninstall -y \
     echo "source /usr/local/Ascend/nnal/atb/set_env.sh" >> ~/.bashrc
 
 # 5. 应用 third_party 补丁（patches/third_party/，git am）
-# TENPU 2b8529f 已吸收原 CP/TE patch；MA v0.3.2 当前没有额外补丁。
 RUN cd /workspace/sglang && \
     git am --whitespace=fix /workspace/slime-ascend/patches/third_party/sglang/* && \
     cd /workspace/Megatron-LM && \

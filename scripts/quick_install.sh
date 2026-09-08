@@ -120,7 +120,6 @@ bash build.sh
 cd slime/
 pip install -e .
 
-# TENPU 2b8529f 已吸收原 CP/TE patch；MA v0.3.2 当前没有额外补丁。
 echo "8. installation complete"
 cd "${REPO_ROOT}"
 # Create folder to store logs
