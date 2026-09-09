@@ -37,7 +37,7 @@ def is_license(file):
 
 
 def is_ut(file):
-    return file.startswith("tests_npu/ut")
+    return file.startswith("tests/tests_npu/ut/")
 
 
 def is_no_suffix(file):
@@ -117,13 +117,10 @@ def acquire_exitcode(command):
 
 class UTTest:
     def __init__(self):
-        # 1. 明确根目录
         current_dir = Path(__file__).absolute().parent
-        self.base_dir = current_dir.parent
-        # 2. 明确 NPU 测试目录
-        self.ut_files = os.path.join(self.base_dir, "tests_npu", "ut")
-        # 3. 默认指向全量 UT 路径
-        self.test_dir = os.path.join(self.base_dir, "tests_npu")
+        self.repo_root = current_dir.parents[1]
+        self.ut_files = str(current_dir / "ut")
+        self.test_dir = str(current_dir)
 
     def run_ut(self, raw_txt_file=None):
         # 如果有增量文件列表，尝试进入增量模式
@@ -131,7 +128,7 @@ class UTTest:
             filtered_results = filter_exec_ut(raw_txt_file)
             if filtered_results[0]:
                 filtered_files = filtered_results[1]
-                full_path = [os.path.join(self.base_dir, file) for file in filtered_files]
+                full_path = [os.path.join(self.repo_root, file) for file in filtered_files]
                 exist_ut_files = [file for file in full_path if os.path.exists(file) and file.endswith(".py")]
                 if exist_ut_files:
                     # 只有找到存在的 py 文件才替换，否则维持默认的全量路径
@@ -160,9 +157,7 @@ class UTTest:
 class STTest:
     def __init__(self):
         current_dir = Path(__file__).absolute().parent
-        self.base_dir = current_dir.parent  
-        # 你的物理路径在 tests_npu/st 下
-        self.test_dir = os.path.join(self.base_dir, 'tests_npu', 'st')
+        self.test_dir = os.path.join(current_dir, 'st')
         self.st_shell = os.path.join(self.test_dir, "st_run.sh")
 
     def run_st(self):
@@ -200,4 +195,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

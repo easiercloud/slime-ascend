@@ -1,8 +1,6 @@
 #!/bin/bash
 
-# 使用 -print0 处理路径中的空格
-#SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-SCRIPT_DIR=/workspace/slime-ascend/tests/tests_npu/st
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 test_scripts=$(find "$SCRIPT_DIR" -type f \( -name "test_*.sh" -o -name "*.py" \))
 # 如果没找到脚本，提前退出并报错
 if [ -z "$test_scripts" ]; then
