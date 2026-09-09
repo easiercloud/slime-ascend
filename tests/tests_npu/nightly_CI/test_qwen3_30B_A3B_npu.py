@@ -14,6 +14,7 @@ MODEL_TYPE = "qwen3-30B-A3B"
 # Eight cards for Megatron training and eight separate cards for rollout.
 NUM_GPUS = 16
 
+
 def execute():
     if USE_FP8_ROLLOUT:
         ckpt_args = (
@@ -142,9 +143,7 @@ def execute():
     )
 
 if __name__ == "__main__":
-    # TODO also use typer
     for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         os.environ.pop(proxy_var, None)
     execute()
-
 

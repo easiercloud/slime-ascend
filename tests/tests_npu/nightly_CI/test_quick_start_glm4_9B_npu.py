@@ -10,6 +10,7 @@ MODEL_NAME = "GLM-Z1-9B-0414"
 MODEL_TYPE = "glm4-9B"
 NUM_GPUS = 8
 
+
 def execute():
     ckpt_args = (
         f"--hf-checkpoint {HF_WEIGHTS_ROOT}/{MODEL_NAME}/ "
@@ -114,9 +115,7 @@ def execute():
     )
 
 if __name__ == "__main__":
-    # TODO also use typer
     for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         os.environ.pop(proxy_var, None)
     execute()
-
 

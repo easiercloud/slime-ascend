@@ -90,20 +90,8 @@ def execute():
         f"{MEGATRON_WEIGHTS_ROOT}/{MODEL_NAME}_torch_dist "
     )
 
-    # Shape:
-    #
-    # rollout_batch_size=4 prompts
-    # n_samples_per_prompt=1
-    #
     # All fan-out is owned by compact_generate. This knob stays at 1 so a
     # regression that confuses sample count vs rollout count surfaces.
-    #
-    # global_batch_size=4
-    # → 1 training step per rollout
-    #
-    # num_rollout=1
-    # → 1 total rollout iteration
-    #
     # Four prompts retain deterministic fan-out values 1, 2 and 3 while
     # keeping global_batch_size divisible by four-way data parallelism.
     #

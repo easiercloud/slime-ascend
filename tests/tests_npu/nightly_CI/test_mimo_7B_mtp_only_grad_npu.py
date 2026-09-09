@@ -21,10 +21,12 @@ MODEL_TYPE = "mimo-7B-rl"
 # training and rollout from competing for the same physical-memory pool.
 NUM_GPUS = 16
 
+
 def prepare():
     """Download model and convert checkpoint with MTP layers."""
 
     # Convert checkpoint with MTP layers enabled
+
 
 def execute():
     """Run training with MTP enabled and very short output length to cause truncation."""

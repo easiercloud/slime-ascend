@@ -7,9 +7,10 @@ import socket
 
 import pytest
 import torch
+import torch_npu
 
 from slime.utils.ppo_utils import calculate_log_probs_and_entropy
-import torch_npu
+
 HF_WEIGHTS_ROOT = "/home/slime-ascend_CI/slime-ascend/weights"
 DATASETS_ROOT = "/home/slime-ascend_CI/slime-ascend/datasets"
 MEGATRON_WEIGHTS_ROOT = "/home/slime-ascend_CI/slime-ascend/weights-MA"
@@ -43,12 +44,14 @@ PARITY_SCENARIOS = [
     (2, True, True, True),
 ]
 
+
 def _free_port() -> int:
     sock = socket.socket()
     sock.bind(("", 0))
     port = sock.getsockname()[1]
     sock.close()
     return port
+
 
 def _full_logits() -> torch.Tensor:
     return torch.tensor(
@@ -61,6 +64,7 @@ def _full_logits() -> torch.Tensor:
         dtype=torch.float32,
     )
 
+
 def _keep_mask() -> torch.Tensor:
     return torch.tensor(
         [
@@ -71,6 +75,7 @@ def _keep_mask() -> torch.Tensor:
         ],
         dtype=torch.bool,
     )
+
 
 def _weighted_loss(
     log_probs: torch.Tensor,
@@ -83,6 +88,7 @@ def _weighted_loss(
     if entropy is not None and entropy_weights is not None:
         loss = loss + (entropy * entropy_weights).sum()
     return loss
+
 
 def _legacy_compute_log_probs(
     logits: torch.Tensor,
@@ -104,6 +110,7 @@ def _legacy_compute_log_probs(
         logits = logits.masked_fill(~keep_mask, float("-inf"))
 
     return -fused_vocab_parallel_cross_entropy(logits.unsqueeze(1), tokens.unsqueeze(1), process_group)
+
 
 class _LegacyVocabParallelEntropy(torch.autograd.Function):
     @staticmethod
@@ -128,8 +135,10 @@ class _LegacyVocabParallelEntropy(torch.autograd.Function):
         grad_input = grad_input * grad_output.unsqueeze(dim=-1)
         return grad_input, None
 
+
 def _legacy_compute_entropy_from_logits(logits: torch.Tensor, process_group) -> torch.Tensor:
     return _LegacyVocabParallelEntropy.apply(logits, process_group)
+
 
 def _assert_logprob_backward_close(actual_grad: torch.Tensor, legacy_grad: torch.Tensor) -> None:
     # Megatron's fused vocab-parallel CE backward quantizes the log-prob
@@ -139,6 +148,7 @@ def _assert_logprob_backward_close(actual_grad: torch.Tensor, legacy_grad: torch
         actual_grad = actual_grad.to(torch.bfloat16)
         legacy_grad = legacy_grad.to(torch.bfloat16)
     torch.testing.assert_close(actual_grad, legacy_grad, rtol=BACKWARD_RTOL, atol=BACKWARD_ATOL)
+
 
 def _assert_legacy_parity(
     *,
@@ -225,6 +235,7 @@ def _assert_legacy_parity(
             atol=ENTROPY_BACKWARD_ATOL,
         )
 
+
 @pytest.fixture(scope="module")
 def hccl_process_group():
     import torch.distributed as dist
@@ -248,6 +259,7 @@ def hccl_process_group():
 
     if created_process_group:
         dist.destroy_process_group()
+
 
 @pytest.mark.parametrize(
     "with_entropy,entropy_has_grad",
@@ -284,6 +296,7 @@ def test_calculate_log_probs_and_entropy_matches_legacy_megatron_npu(
         entropy_has_grad=entropy_has_grad,
     )
 
+
 def _tp2_worker(rank: int, world_size: int, master_port: int) -> None:
     import torch.distributed as dist
 
@@ -317,6 +330,7 @@ def _tp2_worker(rank: int, world_size: int, master_port: int) -> None:
     finally:
         dist.destroy_process_group()
 
+
 @pytest.mark.skipif(not torch.npu.is_available(), reason="Ascend NPU is required")
 def test_calculate_log_probs_and_entropy_matches_legacy_megatron_npu_tp2():
     pytest.importorskip("megatron.core.fusions.fused_cross_entropy")
@@ -336,5 +350,3 @@ def test_calculate_log_probs_and_entropy_matches_legacy_megatron_npu_tp2():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
-
-

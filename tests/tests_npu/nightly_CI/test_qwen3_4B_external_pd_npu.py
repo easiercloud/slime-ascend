@@ -21,6 +21,7 @@ import socket
 import subprocess
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -42,18 +43,23 @@ PREFILL_PORTS = [13150]
 DECODE_PORTS = [13151]
 BOOTSTRAP_PORTS = [13160]
 
+
 def _get_bond_ipv4():
     net_root = Path("/sys/class/net")
     if not net_root.exists():
         return None
 
     bond_ifaces = [
-        path.name for path in net_root.iterdir() if path.name.startswith("bond") and path.name[4:].isdigit()
+        path.name
+        for path in net_root.iterdir()
+        if path.name.startswith("bond") and path.name[4:].isdigit()
     ]
     bond_ifaces.sort(key=lambda name: int(name[4:]))
     for iface in bond_ifaces:
         try:
-            output = subprocess.check_output(["ip", "-o", "-4", "addr", "show", "dev", iface], text=True)
+            output = subprocess.check_output(
+                ["/usr/bin/ip", "-o", "-4", "addr", "show", "dev", iface], text=True
+            )
         except (OSError, subprocess.CalledProcessError):
             continue
         fields = output.split()
@@ -61,6 +67,7 @@ def _get_bond_ipv4():
             if field == "inet" and idx + 1 < len(fields):
                 return fields[idx + 1].split("/", 1)[0]
     return None
+
 
 def _get_external_host():
     env_value = os.environ.get("SLIME_TEST_EXTERNAL_PD_HOST")
@@ -86,16 +93,18 @@ def _get_external_host():
 
     return EXTERNAL_HOST
 
+
 def _get_gpu_split():
     """Partition visible GPUs: 4 train + 1 prefill + 1 decode."""
     all_gpus = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", ",".join(str(i) for i in range(NUM_GPUS))).split(",")
     assert len(all_gpus) >= NUM_GPUS, f"Expected at least {NUM_GPUS} GPUs, got {len(all_gpus)}"
     train_gpus = all_gpus[:NUM_TRAIN_GPUS]
     cursor = NUM_TRAIN_GPUS
-    prefill_gpus = all_gpus[cursor : cursor + NUM_PREFILL_ENGINES]
+    prefill_gpus = all_gpus[cursor:cursor + NUM_PREFILL_ENGINES]
     cursor += NUM_PREFILL_ENGINES
-    decode_gpus = all_gpus[cursor : cursor + NUM_DECODE_ENGINES]
+    decode_gpus = all_gpus[cursor:cursor + NUM_DECODE_ENGINES]
     return train_gpus, prefill_gpus, decode_gpus
+
 
 def _launch_sglang_server(
     *,
@@ -142,8 +151,8 @@ def _launch_sglang_server(
     else:
         raise ValueError(f"Unexpected disaggregation mode: {disaggregation_mode}")
 
-    log_file = open(log_path, "w")
-    process = subprocess.Popen(cmd, env=env, stdout=log_file, stderr=subprocess.STDOUT)
+    with open(log_path, "w") as log_file:
+        process = subprocess.Popen(cmd, env=env, stdout=log_file, stderr=subprocess.STDOUT)
     print(
         f"Starting external sglang {disaggregation_mode} server on GPUs {gpus} "
         f"port={port} tp={tp} (pid={process.pid}), log: {log_path}"
@@ -157,16 +166,19 @@ def _launch_sglang_server(
         if process.poll() is not None:
             raise RuntimeError(f"{disaggregation_mode} server exited with code {process.returncode}; check {log_path}")
         try:
-            req = urllib.request.urlopen(f"http://{external_host}:{port}/server_info", timeout=2)
-            if req.status == 200:
-                print(f"External sglang {disaggregation_mode} server is ready on GPUs {gpus}")
-                return process
-        except Exception:
-            pass
+            with urllib.request.urlopen(f"http://{external_host}:{port}/server_info", timeout=2) as req:
+                if req.status == 200:
+                    print(f"External sglang {disaggregation_mode} server is ready on GPUs {gpus}")
+                    return process
+        except (OSError, urllib.error.URLError):
+            time.sleep(5)
+            continue
         time.sleep(5)
 
     process.kill()
+    process.wait()
     raise RuntimeError(f"{disaggregation_mode} server failed to start within timeout; check {log_path}")
+
 
 def execute():
     train_gpus, prefill_gpus, decode_gpus = _get_gpu_split()
@@ -339,5 +351,3 @@ if __name__ == "__main__":
     for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         os.environ.pop(proxy_var, None)
     execute()
-
-

@@ -12,6 +12,7 @@ MODEL_NAME = "Qwen3-4B"
 MODEL_TYPE = "qwen3-4B"
 NUM_GPUS = 8
 
+
 def execute():
     megatron_config = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
     megatron_config.write(
@@ -138,9 +139,7 @@ megatron:
     )
 
 if __name__ == "__main__":
-    # TODO also use typer
     for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         os.environ.pop(proxy_var, None)
     execute()
-
 

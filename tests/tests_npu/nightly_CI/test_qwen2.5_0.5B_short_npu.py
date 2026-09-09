@@ -8,6 +8,7 @@ MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
 NUM_GPUS = 4
 
+
 def execute():
     ckpt_args = (
         f"--hf-checkpoint {HF_WEIGHTS_ROOT}/{MODEL_NAME}/ "
