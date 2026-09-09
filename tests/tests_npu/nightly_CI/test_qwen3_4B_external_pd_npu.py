@@ -170,7 +170,7 @@ def _launch_sglang_server(
                 if req.status == 200:
                     print(f"External sglang {disaggregation_mode} server is ready on GPUs {gpus}")
                     return process
-        except (OSError, urllib.error.URLError):
+        except urllib.error.URLError:
             time.sleep(5)
             continue
         time.sleep(5)
