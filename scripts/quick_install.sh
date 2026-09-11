@@ -13,7 +13,7 @@ SGLANG_COMMIT=0.5.15.post1
 SGLANG_BASE_COMMIT=0b3bb0cbe31873994c9f989fddfe2f87ca839fdd
 SGLANG_ROUTER_PACKAGE=sglang-router==0.3.2
 # Slime v0.3.2 uses the private prebuilt CANN 9.0/Python 3.12 bundle.
-SGL_KERNEL_NPU_CP312_URL=https://gitcode.com/user-attachments/files/9309418/8f72e74ec572428c87831ac6ef340d89.zip
+SGL_KERNEL_NPU_CP312_URL=https://gitcode.com/gcw_8jFUVqc5/sglang-kernel-npu-builds/releases/download/py312-cann9.0-a3/sgl-kernel-npu-torch2.10.0-py312-cann9.0-a3-aarch64.zip
 SGL_KERNEL_NPU_FIX_COMMIT=9765e27532b8f854717eba1d3fb9a0bb97a0c887
 MEMFABRIC_HYBRID_VERSION=1.0.8
 
@@ -59,13 +59,18 @@ esac
 KERNEL_BUNDLE_TMP=$(mktemp -d)
 wget --no-check-certificate "${SGL_KERNEL_NPU_CP312_URL}" -O "${KERNEL_BUNDLE_TMP}/sgl-kernel-npu-cp312.zip"
 unzip -q "${KERNEL_BUNDLE_TMP}/sgl-kernel-npu-cp312.zip" -d "${KERNEL_BUNDLE_TMP}"
-KERNEL_BUNDLE_DIR="${KERNEL_BUNDLE_TMP}/sgl-kernel-npu-cp312"
+KERNEL_BUNDLE_DIR=$(find "${KERNEL_BUNDLE_TMP}" -type f -name 'sgl_kernel_npu-*-cp312-cp312-linux_aarch64.whl' -printf '%h\n' | head -n 1)
+test -n "${KERNEL_BUNDLE_DIR}"
+test -f "${KERNEL_BUNDLE_DIR}"/torch_memory_saver-*-cp312-cp312-linux_aarch64.whl
+test -f "${KERNEL_BUNDLE_DIR}"/deep_ep-*-cp312-cp312-linux_aarch64.whl
 pip install "${KERNEL_BUNDLE_DIR}"/torch_memory_saver-*-cp312-cp312-linux_aarch64.whl \
     "${KERNEL_BUNDLE_DIR}"/sgl_kernel_npu-*-cp312-cp312-linux_aarch64.whl \
     "${KERNEL_BUNDLE_DIR}"/deep_ep-*-cp312-cp312-linux_aarch64.whl
 # Link the DeepEP extension from the extracted private bundle.
 SITE=$(python -c 'import site; print(site.getsitepackages()[0])')
-ln -sf "${KERNEL_BUNDLE_DIR}/lib/deep_ep_cpp.cpython-312-aarch64-linux-gnu.so" \
+DEEP_EP_CPP=$(find "${KERNEL_BUNDLE_DIR}" -type f -name 'deep_ep_cpp.cpython-312-aarch64-linux-gnu.so' -print -quit)
+test -n "${DEEP_EP_CPP}"
+ln -sf "${DEEP_EP_CPP}" \
     "${SITE}/deep_ep_cpp.cpython-312-aarch64-linux-gnu.so"
 
 # (Optional) Confirm whether the import can be successfully
