@@ -1,7 +1,7 @@
 # slime-ascend 权威补丁清单（按应用顺序）
 schema_version = 2
 upstream_version = "v0.3.2"
-upstream_commit = "3778dbf6d1a533ab478ecf5ddaa11449a47752b2"
+upstream_commit = "4c193f1f37509cca70f0e88807a9305b70f63f4e"
 
 [[patches]]
 id = "slime:npu-compat:common"
@@ -10,7 +10,7 @@ target = "slime"
 file = "utils_common.patch"
 summary = "提供统一 NPU 运行时判定，作为 accelerator 与后端适配的公共依赖"
 issue = "SLIME-V032-001"
-base_commit = "3778dbf6d1a533ab478ecf5ddaa11449a47752b2"
+base_commit = "4c193f1f37509cca70f0e88807a9305b70f63f4e"
 sha256 = "cf3b8cf4364bc910ee8c50fbd244bd6766f56324abc5c8fcca5d7d6f006e5646"
 
 [[patches]]
@@ -20,7 +20,7 @@ target = "slime"
 file = "accelerator_npu_backend.patch"
 summary = "为 v0.3.2 accelerator 抽象增加 Ascend NPU 实现"
 issue = "SLIME-V032-001"
-base_commit = "3778dbf6d1a533ab478ecf5ddaa11449a47752b2"
+base_commit = "4c193f1f37509cca70f0e88807a9305b70f63f4e"
 sha256 = "4f57b24597f44ece191508e61a8a995d110365052f8153c74aec59968c992c87"
 
 [[patches]]
@@ -30,7 +30,7 @@ target = "slime"
 file = "accelerator_runtime_latest.patch"
 summary = "适配 Ray NPU 资源、Megatron/SGLang 启动、设备映射与权重同步；offload_rollout 保持上游参数语义"
 issue = "SLIME-V032-001"
-base_commit = "3778dbf6d1a533ab478ecf5ddaa11449a47752b2"
+base_commit = "4c193f1f37509cca70f0e88807a9305b70f63f4e"
 sha256 = "1a411c0d98c800b3da9a23b672e07225768c2212258d001489ba105f400de926"
 
 [[patches]]
@@ -40,7 +40,7 @@ target = "slime"
 file = "thd_packed_context_parallel.patch"
 summary = "修复 THD packed sequence 的 CP 镜像分区、padded metadata 与 TP physical tail 一致性"
 issue = "SLIME-V032-002"
-base_commit = "3778dbf6d1a533ab478ecf5ddaa11449a47752b2"
+base_commit = "4c193f1f37509cca70f0e88807a9305b70f63f4e"
 sha256 = "cc0644af414cce86a288c617965be6d23c65b64a5fbcfc8c67b4661e2a072577"
 
 [[patches]]
@@ -50,7 +50,7 @@ target = "slime"
 file = "qwen3_5.patch"
 summary = "补齐 v0.3.2 遗漏的 Qwen3.5/VL、GDN 与 MoE Megatron-to-HF 权重映射"
 issue = "SLIME-V032-013"
-base_commit = "3778dbf6d1a533ab478ecf5ddaa11449a47752b2"
+base_commit = "4c193f1f37509cca70f0e88807a9305b70f63f4e"
 sha256 = "6b3d0449970d176f252c3a79f377940da425f59cfdd1f561d7ed23c5673e72db"
 
 [[patches]]
@@ -60,7 +60,7 @@ target = "slime"
 file = "coding-agent-rl-docker-sandbox.patch"
 summary = "为 coding_agent_rl 提供适合内网环境的 DockerSandbox"
 issue = "SLIME-V032-004"
-base_commit = "3778dbf6d1a533ab478ecf5ddaa11449a47752b2"
+base_commit = "4c193f1f37509cca70f0e88807a9305b70f63f4e"
 sha256 = "368cd04f194f46f729d294f455698b3ceca8bf8ec251b3d11746ab05dc46ee88"
 
 [[patches]]
