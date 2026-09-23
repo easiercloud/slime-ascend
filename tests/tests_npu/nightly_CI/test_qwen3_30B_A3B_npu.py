@@ -6,8 +6,11 @@ DATASETS_ROOT = "/home/slime-ascend_CI/slime-ascend/datasets"
 MEGATRON_WEIGHTS_ROOT = "/home/slime-ascend_CI/slime-ascend/weights-MA"
 
 ENABLE_EVAL = bool(int(os.environ.get("SLIME_TEST_ENABLE_EVAL", "1")))
-USE_DEEPEP = bool(int(os.environ.get("SLIME_TEST_USE_DEEPEP", "1")))
-USE_FP8_ROLLOUT = bool(int(os.environ.get("SLIME_TEST_USE_FP8_ROLLOUT", "1")))
+# CANN 9.1 in the current container does not export aclnnDispatchLayout;
+# keep the standard all-to-all dispatcher as the default.  DeepEP and FP8
+# remain explicit opt-ins for environments that provide their operators.
+USE_DEEPEP = bool(int(os.environ.get("SLIME_TEST_USE_DEEPEP", "0")))
+USE_FP8_ROLLOUT = bool(int(os.environ.get("SLIME_TEST_USE_FP8_ROLLOUT", "0")))
 
 MODEL_NAME = "Qwen3-30B-A3B"
 MODEL_TYPE = "qwen3-30B-A3B"
