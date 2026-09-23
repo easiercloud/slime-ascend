@@ -12,6 +12,9 @@ CANN_VERSION=9.0.0
 SGLANG_COMMIT=0.5.15.post1
 SGLANG_BASE_COMMIT=0b3bb0cbe31873994c9f989fddfe2f87ca839fdd
 SGLANG_ROUTER_PACKAGE=sglang-router==0.3.2
+SGLANG_ROUTER_WHEEL=https://github.com/zhuzilin/sgl-router/releases/download/v0.3.2-9daabcd/sglang_router-0.3.2-cp38-abi3-manylinux_2_28_x86_64.whl
+SGL_KERNEL_NPU_VERSION=2026.6.2
+SGL_KERNEL_NPU_WHEEL_VERSION=2026.6.1
 # Slime v0.3.2 uses the private prebuilt CANN 9.0/Python 3.12 bundle.
 SGL_KERNEL_NPU_CP312_URL=https://gitcode.com/gcw_8jFUVqc5/sglang-kernel-npu-builds/releases/download/py312-cann9.0-a3/sgl-kernel-npu-torch2.10.0-py312-cann9.0-a3-aarch64.zip
 SGL_KERNEL_NPU_FIX_COMMIT=9765e27532b8f854717eba1d3fb9a0bb97a0c887

@@ -11,21 +11,19 @@ MODEL_NAME = "Qwen3-0.6B"
 MODEL_TYPE = "qwen3-0.6B"
 NUM_GPUS = 8
 
+HF_WEIGHTS_ROOT = os.environ.get("SLIME_TEST_HF_WEIGHTS_ROOT", "/home/data/weights")
+DATASETS_ROOT = os.environ.get("SLIME_TEST_DATASETS_ROOT", "/home/data/datasets")
+MEGATRON_WEIGHTS_ROOT = os.environ.get(
+    "SLIME_TEST_MEGATRON_WEIGHTS_ROOT", "/home/c00880099/weights-MA"
+)
+
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    # 1. 软链接本地模型权重
-    local_weight_path = f"/home/slime-ascend_CI/slime-ascend/weights/{MODEL_NAME}"
-    target_path = f"/root/models/{MODEL_NAME}"
-    U.exec_command(f"ln -snf {local_weight_path} {target_path}")
-    
-    # 2. 软链接本地数据集 (替换掉之前的 U.hf_download_dataset)
-    local_dataset_path = "/home/slime-ascend_CI/slime-ascend/datasets/dapo-math-17k"
-    target_dataset_path = "/root/datasets/dapo-math-17k"
-    U.exec_command(f"ln -snf {local_dataset_path} {target_dataset_path}")
-
     U.convert_checkpoint(
-        model_name=MODEL_NAME, megatron_model_type=MODEL_TYPE, num_gpus_per_node=NUM_GPUS, dir_dst="/root/models"
+        model_name=MODEL_NAME,
+        megatron_model_type=MODEL_TYPE,
+        num_gpus_per_node=NUM_GPUS,
+        dir_dst=MEGATRON_WEIGHTS_ROOT,
     )
 
 
@@ -39,10 +37,13 @@ def execute():
     os.environ["HYDRA_FULL_ERROR"] = "1"
    
     # ======================= NPU 环境变量 =======================
-    ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load /root/models/{MODEL_NAME}_torch_dist "
+    ckpt_args = (
+        f"--hf-checkpoint {HF_WEIGHTS_ROOT}/{MODEL_NAME}/ "
+        f"--ref-load {MEGATRON_WEIGHTS_ROOT}/{MODEL_NAME}_torch_dist "
+    )
 
     rollout_args = (
-        "--prompt-data /root/datasets/dapo-math-17k/dapo-math-17k.jsonl "
+        f"--prompt-data {DATASETS_ROOT}/dapo-math-17k/dapo-math-17k.jsonl "
         "--input-key prompt "
         "--label-key label "
         "--apply-chat-template "
@@ -182,4 +183,3 @@ if __name__ == "__main__":
     for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         os.environ.pop(proxy_var, None)
     execute()
-

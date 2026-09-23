@@ -140,4 +140,3 @@ if __name__ == "__main__":
     os.environ.pop("HTTP_PROXY", None)
     os.environ.pop("HTTPS_PROXY", None)
     execute()
-

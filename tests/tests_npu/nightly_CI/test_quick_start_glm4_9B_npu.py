@@ -52,7 +52,7 @@ def execute():
         "--recompute-method uniform "
         "--recompute-num-layers 1 "
         "--use-dynamic-batch-size "
-        "--max-tokens-per-gpu 4608 "
+        "--max-tokens-per-gpu 4096 "
     )
 
     grpo_args = (
@@ -69,6 +69,12 @@ def execute():
 
     optimizer_args = (
         "--optimizer adam "
+        # Keep optimizer state on host memory for the NPU quick-start.  The
+        # 9B actor otherwise exhausts device memory during update_weights;
+        # this is the same supported combination used by the NPU run scripts.
+        "--optimizer-cpu-offload "
+        "--overlap-cpu-optimizer-d2h-h2d "
+        "--use-precision-aware-optimizer "
         "--lr 1e-6 "
         "--lr-decay-style constant "
         "--weight-decay 0.1 "
@@ -76,7 +82,11 @@ def execute():
         "--adam-beta2 0.98 "
     )
 
-    sglang_args = "--rollout-num-gpus-per-engine 2 " "--sglang-cuda-graph-max-bs 16 "
+    sglang_args = (
+        "--rollout-num-gpus-per-engine 2 "
+        "--sglang-disable-cuda-graph "
+        "--sglang-mem-fraction-static 0.4 "
+    )
     sglang_args += "--sglang-device npu "
 
     ci_args = "--ci-test "
@@ -118,4 +128,3 @@ if __name__ == "__main__":
     for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         os.environ.pop(proxy_var, None)
     execute()
-

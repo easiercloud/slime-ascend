@@ -64,7 +64,7 @@ def execute():
     sglang_args = (
         "--rollout-num-gpus-per-engine 1 "
         "--sglang-mem-fraction-static 0.4 "
-        "--sglang-cuda-graph-max-bs 4 "
+        "--sglang-disable-cuda-graph "
         "--sglang-enable-metrics "
     )
     sglang_args += "--sglang-device npu "
@@ -114,5 +114,4 @@ if __name__ == "__main__":
     os.environ.pop("HTTP_PROXY")
     os.environ.pop("HTTPS_PROXY")
     execute()
-
 
