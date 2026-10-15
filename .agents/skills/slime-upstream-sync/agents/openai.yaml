@@ -1,0 +1,4 @@
+interface:
+  display_name: "Slime Upstream Sync"
+  short_description: "编排 Slime 上游升级、NPU 转换验证与安全发布"
+  default_prompt: "Use $slime-upstream-sync to validate and synchronize an upstream Slime upgrade with GPU-to-NPU conversion, NPU test autofix, replay verification, and fail-closed release gates."

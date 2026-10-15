@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPU to NPU Test Converter"
+  short_description: "迁移 Slime、VERL 等框架的 GPU 用例到 Ascend NPU"
+  default_prompt: "Use $gpu-to-npu-test-converter to convert selected GPU tests from this framework into behavior-equivalent Ascend NPU cases and hand them off for validation."

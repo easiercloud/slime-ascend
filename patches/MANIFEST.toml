@@ -1,17 +1,17 @@
 # slime-ascend 权威补丁清单（按应用顺序）
 schema_version = 2
-upstream_version = "v0.3.2-8-g85592ba9"
-upstream_commit = "85592ba9443b5cb8713f842aea7fd6944ec156a8"
+upstream_version = "v0.4.0"
+upstream_commit = "0b0c277d5b4cc66efc3b6db269e2e5184e8f3b1e"
 
 [[patches]]
-id = "slime:npu-compat:actor-tms-synchronize"
+id = "slime:npu-compat:v0.4.0-adapter"
 category = "npu-compat"
 target = "slime"
-file = "actor-tms-synchronize.patch"
-summary = "Ascend offload 权重同步前等待 NPU stream 清空，避免 TMS transition 与异步 graph capture 冲突"
-issue = "SLIME-ASCEND-TMS-001"
-base_commit = "85592ba9443b5cb8713f842aea7fd6944ec156a8"
-sha256 = "6bd9524409b97079153a758d1c04b5a6d32d747fe67818f54f68ec51429bd850"
+file = "slime-v0.4.0-adapter.patch"
+summary = "迁移现存 Ascend 训练、CP、设备选择与 Ray NPU 资源适配，并保留权重同步前 TMS stream 同步"
+issue = "SLIME-V040-NPU-001"
+base_commit = "0b0c277d5b4cc66efc3b6db269e2e5184e8f3b1e"
+sha256 = "50f88023d9d6dba8b734b06c84749232adab86d7888b1b5b38506864908f93d4"
 
 [[patches]]
 id = "slime:npu-compat:empty-cache-capture-teardown"
@@ -20,8 +20,18 @@ target = "slime"
 file = "accelerator-empty-cache-captures.patch"
 summary = "Ascend graph teardown 期间窄化吞掉 captures_underway.empty() allocator 错误"
 issue = "SLIME-ASCEND-ALLOC-001"
-base_commit = "85592ba9443b5cb8713f842aea7fd6944ec156a8"
+base_commit = "0b0c277d5b4cc66efc3b6db269e2e5184e8f3b1e"
 sha256 = "dcebdf9f6f975ddddc568744d8541470d58901b08da4bc61afe7449f488546f3"
+
+[[patches]]
+id = "slime:upstream-fixes:qwen2-hf-converter"
+category = "upstream-fixes"
+target = "slime"
+file = "qwen2-hf-converter-v040.patch"
+summary = "从 Qwen2 HF 配置设置转换模型的 RoPE、RMSNorm、GQA 与 QKV bias 参数"
+issue = "SLIME-V040-CONVERT-QWEN2"
+base_commit = "0b0c277d5b4cc66efc3b6db269e2e5184e8f3b1e"
+sha256 = "678c1f30bd6ae002cc5c15a5c1f7fb3cb898ff88f9b4cadf9dc3d5443fd47463"
 
 [[patches]]
 id = "mbridge:npu-device"
@@ -64,24 +74,14 @@ base_commit = "35b4ebfc486fb15dcc0273ceea804c3606be948a"
 sha256 = "67466c7e166bd3362f5b9efaef9b7ad3cd40e1870d8bec27ecab59b330eefd13"
 
 [[patches]]
-id = "megatron:slime-basic"
+id = "megatron:npu-v040-rebased-series"
 category = "third_party"
 target = "megatron"
-file = "megatron/0001-slime-v0.3.1-basic-patch.patch"
-summary = "提供 Slime v0.3.1 在 Ascend 上训练所需的 Megatron 基础适配"
-issue = "SLIME-V031-003"
-base_commit = "1dcf0dafa884ad52ffb243625717a3471643e087"
-sha256 = "e4d1a5bba535f490d2e41be5077305de74d626aff8890610d65c97481fa1e9ad"
-
-[[patches]]
-id = "megatron:attn-mask-checkpoint"
-category = "third_party"
-target = "megatron"
-file = "megatron/0002-Ascend-fix-attn-mask-type-checkpoint-save.patch"
-summary = "修复 Ascend attention mask 类型和 checkpoint 保存兼容"
-issue = "SLIME-V031-003"
-base_commit = "1dcf0dafa884ad52ffb243625717a3471643e087"
-sha256 = "530c005e2fac24bc7f289f2580242be5edf6b03bad2f383f8285dc390fa1ab1b"
+file = "third_party/megatron/megatron-npu-v040-rebased.patch"
+summary = "将现有 Slime Megatron Ascend 适配及 attention-mask/checkpoint 修复迁移到 v0.4.0 Megatron 基线"
+issue = "SLIME-V040-NPU-MEGATRON"
+base_commit = "4b4acac9a1d28ea6829c8d4f566d75698a21249d"
+sha256 = "8a10c404aaad751d6f6c0254382730a940c7f2be468483c0c43bc3942e35d292"
 
 [[patches]]
 id = "sglang:slime-v0.5.15.post1-npu"
