@@ -1,8 +1,8 @@
 diff --git a/tools/convert_hf_to_torch_dist.py b/tools/convert_hf_to_torch_dist.py
-index 62207788..85f9234d 100644
+index 62207788..87f21085 100644
 --- a/tools/convert_hf_to_torch_dist.py
 +++ b/tools/convert_hf_to_torch_dist.py
-@@ -41,6 +41,24 @@ def add_convertion_args(parser):
+@@ -41,6 +41,25 @@ def add_convertion_args(parser):
  def get_args():
      args = parse_args(add_convertion_args)
      args = set_default_megatron_args(args)
@@ -24,6 +24,7 @@ index 62207788..85f9234d 100644
 +        args.layernorm_epsilon = hf_config.rms_norm_eps
 +        args.add_bias_linear = False
 +        args.add_qkv_bias = True
++        args.swiglu = True
  
      # set to pass megatron validate_args
      args.save_interval = 1

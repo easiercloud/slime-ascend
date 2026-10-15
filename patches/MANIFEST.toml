@@ -24,6 +24,16 @@ base_commit = "0b0c277d5b4cc66efc3b6db269e2e5184e8f3b1e"
 sha256 = "dcebdf9f6f975ddddc568744d8541470d58901b08da4bc61afe7449f488546f3"
 
 [[patches]]
+id = "slime:npu-compat:megatron-root-override"
+category = "npu-compat"
+target = "slime"
+file = "megatron-root-override.patch"
+summary = "Allow isolated Megatron root for conversion and Ray runtime"
+issue = "SLIME-V040-NPU-MEGATRON"
+base_commit = "0b0c277d5b4cc66efc3b6db269e2e5184e8f3b1e"
+sha256 = "f37409b1653805b1d32160a76d4fa246f35d3d03639e3b52286543e4943d6d3d"
+
+[[patches]]
 id = "slime:upstream-fixes:qwen2-hf-converter"
 category = "upstream-fixes"
 target = "slime"
@@ -31,7 +41,7 @@ file = "qwen2-hf-converter-v040.patch"
 summary = "从 Qwen2 HF 配置设置转换模型的 RoPE、RMSNorm、GQA 与 QKV bias 参数"
 issue = "SLIME-V040-CONVERT-QWEN2"
 base_commit = "0b0c277d5b4cc66efc3b6db269e2e5184e8f3b1e"
-sha256 = "678c1f30bd6ae002cc5c15a5c1f7fb3cb898ff88f9b4cadf9dc3d5443fd47463"
+sha256 = "8330b9e19e2680d594c2a66ce19be126b3f01ceb8f34c6a3530cd4fe4cc5a555"
 
 [[patches]]
 id = "mbridge:npu-device"

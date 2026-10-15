@@ -107,3 +107,11 @@
 - 新容器安装 Slime v0.4.0 `requirements.txt` 声明的 `straw-queue 0.1.2`。上游 Straw metadata、published payload retry、参数验证 85 passed。
 - 将 `test_rollout_metadata_index.py`、`test_published_payload_retry.py`、`test_reference_top_p_replay.py` 映射到 `tests/tests_npu/ut/*_v040_npu.py`。top-p 迁移用例使用目标 Megatron-Core，不注入仅用于无 Megatron CPU CI 的 `_cp_dist_helpers` 假包，21 passed。
 - 完整 `tests/tests_npu/ut` 在目标 Slime+Megatron 路径下运行：**155 passed，50 warnings，118.70s**。命令环境 `PYTHONPATH=/home/c0088099/slime-ascend-v040/slime:/home/c0088099/slime-v040-deps/Megatron-LM:$PYTHONPATH`，`SLIME_V040_UPSTREAM_ROOT=/home/c0088099/slime-ascend-v040/slime`；完整日志 `/tmp/slime-v040-all-npu-ut.log`。这是 UT gate，通过后才进入 ST。
+
+## 2026-10-15 Qwen2.5 ST 启动与 Ray 资源状态
+
+- 16 卡 HBM 占用下降后，Qwen2.5-0.5B-Instruct HF→Megatron 转换成功。缓存位于 `/home/c0088099/slime-v040-work/weights-MA/Qwen2.5-0.5B-Instruct_torch_dist`；包含 `latest_checkpointed_iteration.txt=release`、`release/.metadata`、`release/metadata.json` 和约 989 MB 分片。转换日志 `/tmp/slime-v040-qwen05-convert.log`。转换配置补齐 Qwen2 SwiGLU。
+- 新容器内 `torchvision 0.25.0` 原为 CUDA wheel，与 CPU 版 PyTorch 不匹配，导致 ST import 阶段报 `torchvision::nms does not exist`；已在隔离容器重装 `torchvision==0.25.0+cpu`，`torchvision.io.decode_jpeg` 导入成功。
+- 下一次 ST 发现 Ray runtime 仍将 `/workspace/Megatron-LM` 放在目标隔离 Megatron 前面，引发 `load_common` 参数类型错配。`command_utils.py` 两处路径改为从 `SLIME_MEGATRON_ROOT` 读取，默认值保留旧路径；相关补丁已登记。`py_compile` 通过。
+- 第三次 ST 提交成功，但前一次失败运行遗留两个 4-NPU Ray placement group，使新 serving group 一直 PENDING。停止了本次提交的 job `raysubmit_WuTiLE5qmHUXaWU5`。准备按 creator_job_id 清理本次任务遗留组时，Ray GCS `192.168.13.185:6379` 无响应，宿主机报 CPU soft lockup；`ray status` 后续仍无法连接。未重启共享 Ray 集群，未删除其他任务资源。当前 **ST 未通过，Nightly 未开始**；日志 `/tmp/slime-v040-qwen05-async-st.log`。
+- 下一步先确认宿主机及 GCS 恢复，重新列出 Ray job/actor/placement group，仅清理本任务 job `02000000` 与 `03000000` 的残留，然后重跑该 ST；按报错继续修复，再进入 Nightly。未推送或合并主分支。

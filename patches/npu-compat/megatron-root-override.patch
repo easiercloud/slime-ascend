@@ -1,0 +1,22 @@
+diff --git a/slime/utils/external_utils/command_utils.py b/slime/utils/external_utils/command_utils.py
+index 4f037d3e..23f6015d 100644
+--- a/slime/utils/external_utils/command_utils.py
++++ b/slime/utils/external_utils/command_utils.py
+@@ -54,7 +54,7 @@ def convert_checkpoint(
+ 
+     exec_command(
+         f"source {repo_base_dir}/scripts/models/{megatron_model_type}.sh && "
+-        f"PYTHONPATH=/workspace/Megatron-LM:/workspace/Megatron-Bridge/src:/workspace/MegatronAdaptor:/workspace/TransformerEngineNPU:$PYTHONPATH "
++        f"PYTHONPATH={os.environ.get('SLIME_MEGATRON_ROOT', '/workspace/Megatron-LM')}:/workspace/Megatron-Bridge/src:/workspace/MegatronAdaptor:/workspace/TransformerEngineNPU:$PYTHONPATH "
+         f"torchrun "
+         f"--nproc-per-node {num_gpus_per_node} "
+         f"{multinode_args}"
+@@ -143,7 +143,7 @@ def execute_train(
+     runtime_env_json = json.dumps(
+         {
+             "env_vars": {
+-                "PYTHONPATH": f"/workspace/Megatron-LM:/workspace/Megatron-Bridge/src:/workspace/MegatronAdaptor:/workspace/TransformerEngineNPU:{os.environ.get('PYTHONPATH', '')}",
++                "PYTHONPATH": f"{os.environ.get('SLIME_MEGATRON_ROOT', '/workspace/Megatron-LM')}:/workspace/Megatron-Bridge/src:/workspace/MegatronAdaptor:/workspace/TransformerEngineNPU:{os.environ.get('PYTHONPATH', '')}",
+                 "SLIME_ENABLE_PROFILING": "False",
+                 "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+                 "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",

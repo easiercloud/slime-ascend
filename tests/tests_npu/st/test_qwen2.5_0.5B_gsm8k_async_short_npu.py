@@ -18,7 +18,7 @@ def execute():
     # ======================= NPU 环境变量 =======================
     ckpt_args = (
             "--hf-checkpoint /home/slime-ascend_CI/slime-ascend/weights/Qwen2.5-0.5B-Instruct "
-            "--ref-load /home/slime-ascend_CI/slime-ascend/weights-MA/Qwen2.5-0.5B-Instruct_torch_dist "
+            f"--ref-load {os.environ.get("SLIME_V040_QWEN05_CKPT", "/home/slime-ascend_CI/slime-ascend/weights-MA/Qwen2.5-0.5B-Instruct_torch_dist")} "
             "--use-dist-ckpt "
         )
     
