@@ -100,3 +100,10 @@
 - Slime 子模块已切至上游 `0b0c277d`，旧 NPU overlay 先保存到子模块 stash `pre-v040-isolated-overlay-20261015`；Manifest 中 target=slime 的三项补丁在该干净基线上按顺序应用成功。
 - 子模块分支 `sync/slime-v0.4.0-npu`，提交 `2946c3d932d84ac63fc38231ccb0c78f5d2f0a78`，包含 v0.4 NPU adapter、allocator capture 修复和 Qwen2 HF 转换配置修复。源码 compileall、`git diff --check`、基于实际子模块的 15 项 tokenizer/checkpoint 映射 UT 均通过。
 - 外层分支 `sync/slime-v0.4.0-npu` 的 gitlink 已指向此子模块提交；本轮未推送或合并主分支。
+
+
+## 2026-10-15 UT 总门槛完成
+
+- 新容器安装 Slime v0.4.0 `requirements.txt` 声明的 `straw-queue 0.1.2`。上游 Straw metadata、published payload retry、参数验证 85 passed。
+- 将 `test_rollout_metadata_index.py`、`test_published_payload_retry.py`、`test_reference_top_p_replay.py` 映射到 `tests/tests_npu/ut/*_v040_npu.py`。top-p 迁移用例使用目标 Megatron-Core，不注入仅用于无 Megatron CPU CI 的 `_cp_dist_helpers` 假包，21 passed。
+- 完整 `tests/tests_npu/ut` 在目标 Slime+Megatron 路径下运行：**155 passed，50 warnings，118.70s**。命令环境 `PYTHONPATH=/home/c0088099/slime-ascend-v040/slime:/home/c0088099/slime-v040-deps/Megatron-LM:$PYTHONPATH`，`SLIME_V040_UPSTREAM_ROOT=/home/c0088099/slime-ascend-v040/slime`；完整日志 `/tmp/slime-v040-all-npu-ut.log`。这是 UT gate，通过后才进入 ST。

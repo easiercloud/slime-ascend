@@ -83,3 +83,10 @@
 - `test_stateless_adam` 首次在 NPU 目录复跑有 3 个 checkpoint 案例找错代码路径，修正为 clean replay 源后 6 项全过。
 - UT 测试适配添加 `_install_npu_cuda_compat` AST no-op，避免隔离流程误调用设备初始化；生产代码未作此回归相关改动。
 - 上游纯 UT 收集环境 `/workspace` 的 `PYTHONPATH` 会导入旧工作区 Slime/MegatronAdaptor。目标测试运行需将 clean replay 放在 `PYTHONPATH` 前；该目录的导入隔离仍需作为 CI 启动器配置处理。
+
+
+### 2026-10-15 更新：Straw 与 top-p 映射完成
+
+- 安装 `straw-queue 0.1.2` 后，上游 metadata/payload/argument-validation 三组 85 passed；映射到 NPU UT 的同三组亦 85 passed。
+- `test_reference_top_p_replay_v040_npu.py` 在真实目标 Megatron-Core 导入路径下 21 passed。
+- 整个 `tests/tests_npu/ut` 最终合并门槛 155 passed，50 warnings，118.70s；此前记录的 Straw/top-p 阻塞已解除。
