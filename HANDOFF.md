@@ -121,3 +121,8 @@
 - 隔离容器仍在运行，但 2026-10-15 的 GCS/raylet 已退出。首次重跑时 `ray status` 对失效 GCS 地址超时，`execute_train()` 未捕获 `TimeoutExpired`。现将该异常视为 Ray 未运行，随后启动新 head；`py_compile` 与 `git diff --check` 通过，补丁 `megatron-root-override.patch` 已更新。
 - 重跑 `tests/tests_npu/st/test_qwen2.5_0.5B_gsm8k_async_short_npu.py`：**退出码 0，Ray job `raysubmit_ehrirgUisw48g5is` succeeded**。日志中确认 4 个 SGLang 引擎初始化、Megatron checkpoint 加载、训练 step 2 指标和权重同步。日志 `/tmp/slime-v040-qwen05-async-st-20261016b.log`。
 - UT gate 仍为 155 passed；Nightly 下一步选 Qwen2.5-0.5B 短用例，使用隔离 checkpoint 缓存，运行后继续诊断。
+
+## 2026-10-16 Nightly 首轮定位
+
+- Qwen2.5-0.5B `nightly_CI/test_qwen2.5_0.5B_short_npu.py` 的 Megatron checkpoint 根目录改为可由 `SLIME_V040_MEGATRON_WEIGHTS_ROOT` 指定，本轮使用已生成的隔离缓存。
+- 首次 Nightly job `raysubmit_b6F3fLnevktKwAA9` 失败于 Megatron DDP buffer 初始化中的 `torch_memory_saver.region`：`assert not tms_get_interesting_region()`。该用例开启 `--colocate`，ST 不覆盖此路径。容器版本 `torch_memory_saver 0.0.8`、`sgl_kernel_npu 2026.9.0`。日志 `/tmp/slime-v040-qwen05-nightly-short-20261016.log`。尚未判定是嵌套 region、残留状态还是版本组合，不应将此 Nightly 记为通过。下一步核对 `param_and_grad_buffer.py` 的 region 生命周期和 Slime colocate 初始化，定位后修复并回归。
