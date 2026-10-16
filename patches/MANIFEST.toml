@@ -28,10 +28,10 @@ id = "slime:npu-compat:megatron-root-override"
 category = "npu-compat"
 target = "slime"
 file = "megatron-root-override.patch"
-summary = "Allow isolated Megatron root for conversion and Ray runtime"
+summary = "Allow isolated Megatron root and restart Ray when stale GCS times out"
 issue = "SLIME-V040-NPU-MEGATRON"
 base_commit = "0b0c277d5b4cc66efc3b6db269e2e5184e8f3b1e"
-sha256 = "f37409b1653805b1d32160a76d4fa246f35d3d03639e3b52286543e4943d6d3d"
+sha256 = "6891b9a8338feec8240dbdf4f3477b1c6445855950af6f46723549b551f25d97"
 
 [[patches]]
 id = "slime:upstream-fixes:qwen2-hf-converter"

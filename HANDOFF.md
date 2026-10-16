@@ -115,3 +115,9 @@
 - 下一次 ST 发现 Ray runtime 仍将 `/workspace/Megatron-LM` 放在目标隔离 Megatron 前面，引发 `load_common` 参数类型错配。`command_utils.py` 两处路径改为从 `SLIME_MEGATRON_ROOT` 读取，默认值保留旧路径；相关补丁已登记。`py_compile` 通过。
 - 第三次 ST 提交成功，但前一次失败运行遗留两个 4-NPU Ray placement group，使新 serving group 一直 PENDING。停止了本次提交的 job `raysubmit_WuTiLE5qmHUXaWU5`。准备按 creator_job_id 清理本次任务遗留组时，Ray GCS `192.168.13.185:6379` 无响应，宿主机报 CPU soft lockup；`ray status` 后续仍无法连接。未重启共享 Ray 集群，未删除其他任务资源。当前 **ST 未通过，Nightly 未开始**；日志 `/tmp/slime-v040-qwen05-async-st.log`。
 - 下一步先确认宿主机及 GCS 恢复，重新列出 Ray job/actor/placement group，仅清理本任务 job `02000000` 与 `03000000` 的残留，然后重跑该 ST；按报错继续修复，再进入 Nightly。未推送或合并主分支。
+
+## 2026-10-16 Ray 恢复与 Qwen2.5 ST 通过
+
+- 隔离容器仍在运行，但 2026-10-15 的 GCS/raylet 已退出。首次重跑时 `ray status` 对失效 GCS 地址超时，`execute_train()` 未捕获 `TimeoutExpired`。现将该异常视为 Ray 未运行，随后启动新 head；`py_compile` 与 `git diff --check` 通过，补丁 `megatron-root-override.patch` 已更新。
+- 重跑 `tests/tests_npu/st/test_qwen2.5_0.5B_gsm8k_async_short_npu.py`：**退出码 0，Ray job `raysubmit_ehrirgUisw48g5is` succeeded**。日志中确认 4 个 SGLang 引擎初始化、Megatron checkpoint 加载、训练 step 2 指标和权重同步。日志 `/tmp/slime-v040-qwen05-async-st-20261016b.log`。
+- UT gate 仍为 155 passed；Nightly 下一步选 Qwen2.5-0.5B 短用例，使用隔离 checkpoint 缓存，运行后继续诊断。
