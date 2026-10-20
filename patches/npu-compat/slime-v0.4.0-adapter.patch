@@ -1,3 +1,28 @@
+From d790a80c21369da18fdcdc26659ba9d6cacc9b9e Mon Sep 17 00:00:00 2001
+From: Slime Ascend Sync <sync@local.invalid>
+Date: Tue, 20 Oct 2026 11:22:33 +0800
+Subject: [PATCH] Adapt Slime v0.4.0 to Ascend training and Ray NPU resources
+
+---
+ slime/backends/megatron_utils/__init__.py     |   4 +-
+ slime/backends/megatron_utils/actor.py        |   5 +
+ slime/backends/megatron_utils/cp_utils.py     | 124 ++++++++++++++++++
+ slime/backends/megatron_utils/data.py         |  68 ++++++++--
+ slime/backends/megatron_utils/initialize.py   |  28 ++++
+ slime/backends/sglang_utils/engine_group.py   |   3 +-
+ slime/backends/sglang_utils/server_control.py |   2 +
+ slime/ray/actor_group.py                      |   5 +-
+ slime/ray/placement_group.py                  |  18 ++-
+ slime/ray/train_actor.py                      |   6 +-
+ slime/utils/accelerator/__init__.py           |  12 ++
+ slime/utils/accelerator/base.py               |   1 +
+ slime/utils/accelerator/cuda.py               |   8 +-
+ slime/utils/accelerator/npu.py                |  13 ++
+ slime/utils/external_utils/command_utils.py   |  51 +++++--
+ slime/utils/memory_utils.py                   |   2 +-
+ tests/test_accelerator.py                     |   1 +
+ 17 files changed, 318 insertions(+), 33 deletions(-)
+
 diff --git a/slime/backends/megatron_utils/__init__.py b/slime/backends/megatron_utils/__init__.py
 index 55372a86..4dea1708 100644
 --- a/slime/backends/megatron_utils/__init__.py
@@ -474,30 +499,10 @@ index e91bc5a2..e6f1730c 100644
  
  class TrainRayActor(RayActor):
 diff --git a/slime/utils/accelerator/__init__.py b/slime/utils/accelerator/__init__.py
-index 98127eac..8ab89a71 100644
+index 98127eac..eb517f2c 100644
 --- a/slime/utils/accelerator/__init__.py
 +++ b/slime/utils/accelerator/__init__.py
-@@ -102,6 +102,10 @@ def is_musa_environment() -> bool:
-     )
- 
- 
-+def is_npu_available() -> bool:
-+    return _is_npu_available()
-+
-+
- def _try_import_musa_patch() -> bool:
-     global _MUSA_PATCH_IMPORTED
-     if _MUSA_PATCH_IMPORTED:
-@@ -251,7 +255,7 @@ def _register_builtin_backends() -> None:
-             "musa", MUSAAccelerator, is_musa_available, priority=200, communication_backends=("mccl",)
-         )
-     if "npu" not in _REGISTRY:
--        register_accelerator("npu", NPUAccelerator, is_npu_available, priority=250, communication_backends=("hccl",))
-+        register_accelerator("npu", NPUAccelerator, is_npu_available, priority=300, communication_backends=("hccl",))
-     if "supa" not in _REGISTRY:
-         register_accelerator(
-             "supa", SUPAAccelerator, is_supa_available, priority=150, communication_backends=("bccl",)
-@@ -525,5 +529,17 @@ def visible_devices_env_key() -> str:
+@@ -525,5 +525,17 @@ def visible_devices_env_key() -> str:
      return _backend().visible_devices_env
  
  

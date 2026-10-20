@@ -1,3 +1,12 @@
+From c127be0c10f85f13d97da92c7424936f405ccc95 Mon Sep 17 00:00:00 2001
+From: Slime Ascend Sync <sync@local.invalid>
+Date: Tue, 20 Oct 2026 11:24:12 +0800
+Subject: [PATCH] Allow configurable Megatron root and recover stale Ray GCS
+
+---
+ slime/utils/external_utils/command_utils.py | 19 +++++++++++--------
+ 1 file changed, 11 insertions(+), 8 deletions(-)
+
 diff --git a/slime/utils/external_utils/command_utils.py b/slime/utils/external_utils/command_utils.py
 index 4f037d3e..f8279109 100644
 --- a/slime/utils/external_utils/command_utils.py

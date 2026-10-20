@@ -1,3 +1,12 @@
+From 3fcf807a864426d171fb2e97b4363a6276799cd3 Mon Sep 17 00:00:00 2001
+From: Slime Ascend Sync <sync@local.invalid>
+Date: Tue, 20 Oct 2026 11:26:44 +0800
+Subject: [PATCH] Preserve Qwen2 HF architecture settings during conversion
+
+---
+ tools/convert_hf_to_torch_dist.py | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
 diff --git a/tools/convert_hf_to_torch_dist.py b/tools/convert_hf_to_torch_dist.py
 index 62207788..87f21085 100644
 --- a/tools/convert_hf_to_torch_dist.py

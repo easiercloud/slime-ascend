@@ -5,6 +5,7 @@ NPU_DEVICE=${NPU_DEVICE:=A3}
 python -c 'import sys; assert sys.version_info[:2] == (3, 12), f"Python 3.12 is required, got {sys.version}"'
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
+python "${REPO_ROOT}/scripts/check_patch_manifest.py"
 DEPS_ROOT=${SLIME_ASCEND_DEPS_ROOT:-"$(dirname "${REPO_ROOT}")"}
 
 # Pinned dependency contract for the current Ascend validation environment.
@@ -12,11 +13,7 @@ CANN_VERSION=9.1.0
 SGLANG_COMMIT=0.5.15.post1
 SGLANG_BASE_COMMIT=0b3bb0cbe31873994c9f989fddfe2f87ca839fdd
 SGLANG_ROUTER_PACKAGE=sglang-router==0.3.2
-SGLANG_ROUTER_WHEEL=https://github.com/zhuzilin/sgl-router/releases/download/v0.3.2-9daabcd/sglang_router-0.3.2-cp38-abi3-manylinux_2_28_x86_64.whl
-SGL_KERNEL_NPU_VERSION=2026.9.0
-SGL_KERNEL_NPU_WHEEL_VERSION=2026.9.0
-# Slime v0.3.2 uses the private prebuilt CANN 9.0/Python 3.12 bundle.
-SGL_KERNEL_NPU_CP312_URL=https://gitcode.com/gcw_8jFUVqc5/sglang-kernel-npu-builds/releases/download/py312-cann9.0-a3/sgl-kernel-npu-torch2.10.0-py312-cann9.0-a3-aarch64.zip
+SGL_KERNEL_NPU_VERSION=${SGL_KERNEL_NPU_VERSION:-2026.9.0.post10}
 SGL_KERNEL_NPU_FIX_COMMIT=9765e27532b8f854717eba1d3fb9a0bb97a0c887
 MEMFABRIC_HYBRID_VERSION=1.0.8
 
@@ -45,38 +42,36 @@ cd ..
 echo "2. install torch & torch_npu & other basic packages"
 pip install torch==2.10.0 torch_npu==2.10.0.post4 torchvision==0.25.0 setuptools==81.0.0
 pip install "memfabric-hybrid==${MEMFABRIC_HYBRID_VERSION}"
-pip install "${SGLANG_ROUTER_WHEEL}" --force-reinstall
+pip install "${SGLANG_ROUTER_PACKAGE}" --force-reinstall
 python -c "import sglang_router"
 
-echo "3.install private CANN 9.0/Python 3.12 sgl-kernel-npu bundle"
+echo "3. install the Python 3.12 / CANN 9.1.0 sgl-kernel-npu bundle"
 KERNEL_ARCH=$(uname -m)
-if [ "${KERNEL_ARCH}" != "aarch64" ]; then
-    echo "the private cp312 sgl-kernel-npu bundle only provides linux_aarch64 wheels (got ${KERNEL_ARCH})" >&2
-    exit 1
-fi
+case "${KERNEL_ARCH}" in
+    x86_64|aarch64) ;;
+    *) echo "unsupported architecture: ${KERNEL_ARCH}" >&2; exit 1 ;;
+esac
 case "${NPU_DEVICE}" in
     A3) KERNEL_DEVICE=a3 ;;
     A2) KERNEL_DEVICE=910b ;;
     *) echo "unsupported NPU_DEVICE: ${NPU_DEVICE}" >&2; exit 1 ;;
 esac
+SGL_KERNEL_NPU_URL=${SGL_KERNEL_NPU_URL:-https://github.com/sgl-project/sgl-kernel-npu/releases/download/${SGL_KERNEL_NPU_VERSION}/sgl-kernel-npu-${SGL_KERNEL_NPU_VERSION}-torch2.10.0-py312-cann${CANN_VERSION}-${KERNEL_DEVICE}-${KERNEL_ARCH}.zip}
 KERNEL_BUNDLE_TMP=$(mktemp -d)
-wget --no-check-certificate "${SGL_KERNEL_NPU_CP312_URL}" -O "${KERNEL_BUNDLE_TMP}/sgl-kernel-npu-cp312.zip"
-unzip -q "${KERNEL_BUNDLE_TMP}/sgl-kernel-npu-cp312.zip" -d "${KERNEL_BUNDLE_TMP}"
-KERNEL_BUNDLE_DIR=$(find "${KERNEL_BUNDLE_TMP}" -type f -name 'sgl_kernel_npu-*-cp312-cp312-linux_aarch64.whl' -printf '%h\n' | head -n 1)
+wget "${SGL_KERNEL_NPU_URL}" -O "${KERNEL_BUNDLE_TMP}/sgl-kernel-npu.zip"
+unzip -q "${KERNEL_BUNDLE_TMP}/sgl-kernel-npu.zip" -d "${KERNEL_BUNDLE_TMP}"
+KERNEL_BUNDLE_DIR=$(find "${KERNEL_BUNDLE_TMP}" -type f -name "sgl_kernel_npu-*-cp312-cp312-linux_${KERNEL_ARCH}.whl" -printf '%h\n' | head -n 1)
 test -n "${KERNEL_BUNDLE_DIR}"
-test -f "${KERNEL_BUNDLE_DIR}"/torch_memory_saver-*-cp312-cp312-linux_aarch64.whl
-test -f "${KERNEL_BUNDLE_DIR}"/deep_ep-*-cp312-cp312-linux_aarch64.whl
-pip install "${KERNEL_BUNDLE_DIR}"/torch_memory_saver-*-cp312-cp312-linux_aarch64.whl \
-    "${KERNEL_BUNDLE_DIR}"/sgl_kernel_npu-*-cp312-cp312-linux_aarch64.whl \
-    "${KERNEL_BUNDLE_DIR}"/deep_ep-*-cp312-cp312-linux_aarch64.whl
-# Link the DeepEP extension from the extracted private bundle.
+test -f "${KERNEL_BUNDLE_DIR}"/torch_memory_saver-*-cp312-cp312-linux_${KERNEL_ARCH}.whl
+test -f "${KERNEL_BUNDLE_DIR}"/deep_ep-*-cp312-cp312-linux_${KERNEL_ARCH}.whl
+pip install "${KERNEL_BUNDLE_DIR}"/torch_memory_saver-*-cp312-cp312-linux_${KERNEL_ARCH}.whl \
+    "${KERNEL_BUNDLE_DIR}"/sgl_kernel_npu-*-cp312-cp312-linux_${KERNEL_ARCH}.whl \
+    "${KERNEL_BUNDLE_DIR}"/deep_ep-*-cp312-cp312-linux_${KERNEL_ARCH}.whl
 SITE=$(python -c 'import site; print(site.getsitepackages()[0])')
-DEEP_EP_CPP=$(find "${KERNEL_BUNDLE_DIR}" -type f -name 'deep_ep_cpp.cpython-312-aarch64-linux-gnu.so' -print -quit)
-test -n "${DEEP_EP_CPP}"
-ln -sf "${DEEP_EP_CPP}" \
-    "${SITE}/deep_ep_cpp.cpython-312-aarch64-linux-gnu.so"
-
-# (Optional) Confirm whether the import can be successfully
+DEEP_EP_CPP=$(find "${KERNEL_BUNDLE_DIR}" -type f -name "deep_ep_cpp.cpython-312-${KERNEL_ARCH}-linux-gnu.so" -print -quit)
+if [ -n "${DEEP_EP_CPP}" ]; then
+    ln -sf "${DEEP_EP_CPP}" "${SITE}/$(basename "${DEEP_EP_CPP}")"
+fi
 python -c "import deep_ep; print(deep_ep.__path__)"
 
 echo "3.1 rebuild torch-memory-saver with the registered lifecycle patch"
@@ -121,7 +116,7 @@ pip uninstall triton triton_ascend -y
 pip install triton_ascend==3.2.1
 
 echo "7. install slime-ascend"
-# Keep the submodule on the official v0.3.2 commit and replay the registered
+# Keep the submodule on the official v0.4.0 commit and replay the registered
 # format-patch series before installing the Python project.
 cd "${REPO_ROOT}"
 bash build.sh

@@ -126,3 +126,13 @@
 
 - Qwen2.5-0.5B `nightly_CI/test_qwen2.5_0.5B_short_npu.py` 的 Megatron checkpoint 根目录改为可由 `SLIME_V040_MEGATRON_WEIGHTS_ROOT` 指定，本轮使用已生成的隔离缓存。
 - 首次 Nightly job `raysubmit_b6F3fLnevktKwAA9` 失败于 Megatron DDP buffer 初始化中的 `torch_memory_saver.region`：`assert not tms_get_interesting_region()`。该用例开启 `--colocate`，ST 不覆盖此路径。容器版本 `torch_memory_saver 0.0.8`、`sgl_kernel_npu 2026.9.0`。日志 `/tmp/slime-v040-qwen05-nightly-short-20261016.log`。尚未判定是嵌套 region、残留状态还是版本组合，不应将此 Nightly 记为通过。下一步核对 `param_and_grad_buffer.py` 的 region 生命周期和 Slime colocate 初始化，定位后修复并回归。
+
+## 2026-10-20：v0.4.0 补丁与 Python 3.12 文档整理
+
+- 工作分支：`sync/slime-v040-dev-cleanup-20261020`，其历史包含 `upstream/dev` 基线。本轮只准备推送该工作分支，不改动 `dev` 本身。
+- 将 submodule gitlink 从仅本机可见的 `4f3754e5` 改为公开 v0.4.0 tag commit `0b0c277d`；真实 NPU 改动仍通过 `patches/MANIFEST.toml` 回放。
+- 对 `slime-v0.4.0-adapter.patch` 删除 upstream v0.4.0 已有的重复 `is_npu_available` 定义和不必要的 NPU 优先级修改，保留 Ray NPU 资源、MegatronAdaptor 初始化及训练兼容逻辑。三份原始裸 diff 已改为可由 `git am` 应用的邮件补丁。
+- 修正清单里 Megatron 补丁路径重复 `third_party/` 的错误；增加 `scripts/check_patch_manifest.py`，在安装和重置 submodule 前校验所有 13 个登记补丁的路径与 SHA256。全部通过。
+- 将现有 Dockerfile 改为 CANN 9.1.0 / Python 3.12 版本，并只通过 `scripts/quick_install.sh` 进入 third_party 与 Slime 补丁流程，避免 Dockerfile 再维护一套通配符 `git am` 命令。安装脚本改为按架构选用官方 Python 3.12 / CANN 9.1.0 sgl-kernel-npu 包。已更新现有 `docs/get_started/quick_start.md`，没有新建替代文档。
+- 校验：`bash -n scripts/quick_install.sh` 通过；quick start 所有仓库相对链接存在；独立 `slime-patch-replay-check-20261020` 工作树从 v0.4.0 tag 顺序回放四份 Slime 补丁均通过，`git diff --check` 无问题。
+- 未运行完整 Docker 镜像构建或 v0.4.0 Nightly。前一轮当前 Slime-Ascend 分支的 UT 11 项、ST 3 个文件、Nightly 18 个文件通过，不能直接视为此 v0.4.0 分支的验证结果。
