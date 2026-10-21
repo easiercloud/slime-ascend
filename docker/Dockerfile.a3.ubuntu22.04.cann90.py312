@@ -1,0 +1,87 @@
+FROM --platform=linux/arm64 quay.io/ascend/cann:9.0.0-a3-ubuntu22.04-py3.12
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ENV http_proxy=$HTTP_PROXY
+ENV https_proxy=$HTTPS_PROXY
+ENV HTTP_PROXY=$HTTP_PROXY
+ENV HTTPS_PROXY=$HTTPS_PROXY
+
+WORKDIR /workspace
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends gcc g++ cmake libnuma-dev wget git curl jq vim build-essential unzip && \
+    apt-get clean && rm -rf /var/lib/apt/lists/* && \
+    pip install --upgrade pip packaging setuptools==80.10.2 && \
+    python -c 'import sys; assert sys.version_info[:2] == (3, 12), sys.version' && \
+    grep -q '^version=9.0.0$' /usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/ascend_toolkit_install.info && \
+    test "$(uname -m)" = aarch64 && \
+    git config --global user.email 'temp@example.com' && git config --global user.name 'temp'
+
+# Build from the repository root. Retain the git metadata for submodule replay.
+COPY . /workspace/slime-ascend
+RUN python /workspace/slime-ascend/scripts/check_patch_manifest.py
+
+# 1. SGLang v0.5.15.post1.
+RUN git clone --depth 1 --branch v0.5.15.post1 https://github.com/sgl-project/sglang.git /workspace/sglang && \
+    cd /workspace/sglang && git checkout v0.5.15.post1 && \
+    test "$(git rev-parse HEAD)" = 0b3bb0cbe31873994c9f989fddfe2f87ca839fdd && \
+    git am /workspace/slime-ascend/patches/third_party/sglang/0001-slime-v0.5.15.post1-npu.patch \
+           /workspace/slime-ascend/patches/third_party/sglang/0002-tms-adapter-forward-cuda-graph-arguments.patch && \
+    mv python/pyproject.toml python/pyproject.toml.backup && \
+    mv python/pyproject_npu.toml python/pyproject.toml && \
+    sed -i 's/transformers==5.12.1/transformers==5.3.0/' python/pyproject.toml && \
+    grep -q '"transformers==5.3.0"' python/pyproject.toml && \
+    pip install -e 'python[all_npu]'
+
+# 2. PyTorch, torch_npu, router and rollout dependencies.
+RUN pip install torch==2.10.0 torch_npu==2.10.0.post4 torchvision==0.25.0 \
+        pybind11==3.0.3 transformers==5.3.0 triton-ascend==3.2.1 memfabric-hybrid==1.0.8 && \
+    pip install sglang-router==0.3.2 --force-reinstall && \
+    python -c 'import sglang_router'
+
+# 3. Build the A3 aarch64 NPU kernels for CANN 9.0.0 / Python 3.12.
+# The upstream CANN 9.0 release bundle is py311; this image compiles cp312 packages.
+RUN git clone https://github.com/sgl-project/sgl-kernel-npu.git /workspace/sgl-kernel-npu && \
+    cd /workspace/sgl-kernel-npu && git checkout 9765e27532b8f854717eba1d3fb9a0bb97a0c887 && \
+    git am /workspace/slime-ascend/patches/third_party/sgl-kernel-npu/0001-fix-torch-memory-saver-allocation-lifecycle.patch \
+           /workspace/slime-ascend/patches/third_party/sgl-kernel-npu/0002-fix-tms-sglang-cuda-graph-api-and-preload-mode.patch && \
+    bash build.sh && \
+    pip install ./python/deep_ep ./python/sgl_kernel_npu ./contrib/torch_memory_saver/python
+
+# 4. Megatron-LM, bridge and mbridge.
+RUN git clone https://github.com/ISEEKYAN/mbridge.git /workspace/mbridge && \
+    cd /workspace/mbridge && git checkout 89eb10887887bc74853f89a4de258c0702932a1c && \
+    git am /workspace/slime-ascend/patches/third_party/mbridge/0001-fix-device-type.patch && pip install -e . && \
+    git clone https://github.com/fzyzcjy/Megatron-Bridge.git /workspace/Megatron-Bridge && \
+    cd /workspace/Megatron-Bridge && git checkout 35b4ebfc486fb15dcc0273ceea804c3606be948a && \
+    git am /workspace/slime-ascend/patches/third_party/megatron-bridge/0001-ascend-megatron-bridge-patch-for-slime-v0.3.2.patch \
+           /workspace/slime-ascend/patches/third_party/megatron-bridge/0002-adapts-to-transformer-5.3.0-for-VL-model.patch \
+           /workspace/slime-ascend/patches/third_party/megatron-bridge/0003-megatron-Bridge-for-Qwen.patch && \
+    pip install 'nvidia-modelopt[torch]==0.46.1' --no-build-isolation && \
+    git clone --recursive https://github.com/NVIDIA/Megatron-LM.git /workspace/Megatron-LM && \
+    cd /workspace/Megatron-LM && git checkout 1dcf0dafa884ad52ffb243625717a3471643e087 && \
+    git am /workspace/slime-ascend/patches/third_party/megatron/megatron-npu-v040-rebased.patch && pip install -e .
+
+# 5. MegatronAdaptor + TransformerEngineNPU; MindSpeed is not installed.
+RUN git clone https://gitcode.com/Ascend/MegatronAdaptor.git /workspace/MegatronAdaptor && \
+    cd /workspace/MegatronAdaptor && git checkout f707a3b6eb9981532c3419c08ea40a8bb5962af5 && \
+    pip install -e . && \
+    git clone https://gitcode.com/Ascend/TransformerEngineNPU.git /workspace/TransformerEngineNPU && \
+    cd /workspace/TransformerEngineNPU && git checkout 2b8529f94c3fd10497bf772bdc5b448b7ed4659a && \
+    pip install -e .
+
+# 6. Triton and the Slime v0.4.0 patch series.
+RUN pip uninstall -y triton triton-ascend opencv-python && \
+    pip install triton-ascend==3.2.1 \
+        --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ \
+        --trusted-host triton-ascend.osinfra.cn --no-cache-dir && \
+    echo 'source /usr/local/Ascend/ascend-toolkit/set_env.sh' >> /root/.bashrc && \
+    echo 'source /usr/local/Ascend/nnal/atb/set_env.sh' >> /root/.bashrc && \
+    cd /workspace/slime-ascend && git submodule update --init --recursive && \
+    bash build.sh && pip install -e slime && mkdir -p logs && \
+    python -c 'import slime, torch, torch_npu; print(torch.__version__)'
+
+RUN pip list && unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+CMD ["/bin/bash"]
