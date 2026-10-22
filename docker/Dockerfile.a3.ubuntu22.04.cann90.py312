@@ -61,7 +61,7 @@ RUN git clone https://github.com/ISEEKYAN/mbridge.git /workspace/mbridge && \
            /workspace/slime-ascend/patches/third_party/megatron-bridge/0003-megatron-Bridge-for-Qwen.patch && \
     pip install 'nvidia-modelopt[torch]==0.46.1' --no-build-isolation && \
     git clone --recursive https://github.com/NVIDIA/Megatron-LM.git /workspace/Megatron-LM && \
-    cd /workspace/Megatron-LM && git checkout 1dcf0dafa884ad52ffb243625717a3471643e087 && \
+    cd /workspace/Megatron-LM && git checkout 4b4acac9a1d28ea6829c8d4f566d75698a21249d && \
     git am /workspace/slime-ascend/patches/third_party/megatron/megatron-npu-v040-rebased.patch && pip install -e .
 
 # 5. MegatronAdaptor + TransformerEngineNPU; MindSpeed is not installed.

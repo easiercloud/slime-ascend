@@ -61,7 +61,7 @@ cd ..
 pip install 'nvidia-modelopt[torch]==0.46.1' --no-build-isolation
 
 git clone https://github.com/NVIDIA/Megatron-LM.git --recursive && \
-cd Megatron-LM/ && git checkout 1dcf0dafa884ad52ffb243625717a3471643e087 && \
+cd Megatron-LM/ && git checkout 4b4acac9a1d28ea6829c8d4f566d75698a21249d && \
 git am "${REPO_ROOT}/patches/third_party/megatron/megatron-npu-v040-rebased.patch" && \
 pip install -e . && cd ..
 

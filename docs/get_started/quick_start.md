@@ -13,7 +13,7 @@
 | 基础镜像 | `quay.io/ascend/cann:9.0.0-a3-ubuntu22.04-py3.12`（`linux/arm64`） |
 | Python / CANN | 3.12 / 9.0.0 |
 | torch / torch_npu / torchvision | 2.10.0 / 2.10.0.post4 / 0.25.0 |
-| Megatron-LM | `1dcf0dafa884ad52ffb243625717a3471643e087` |
+| Megatron-LM | `4b4acac9a1d28ea6829c8d4f566d75698a21249d` |
 | MegatronAdaptor | `f707a3b6eb9981532c3419c08ea40a8bb5962af5` |
 | TransformerEngineNPU | `2b8529f94c3fd10497bf772bdc5b448b7ed4659a` |
 | Megatron-Bridge | `35b4ebfc486fb15dcc0273ceea804c3606be948a` |
