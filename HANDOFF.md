@@ -156,3 +156,9 @@
 - ????? v0.3.2 Dockerfile ???? `cann900.latest`??? v0.3.2 ????????? `docker/Dockerfile.a3.ubuntu22.04.cann90.latest`?????? CANN 9.0.0?Python 3.11?py311 SGL ?????? MegatronAdaptor ????????????? Slime ????? MA ?????????? Python 3.12 / ARM64 v0.4.0 ???
 - v0.3.2 ? Slime ????? `3778dbf6`?v0.4.0 ? `0b0c277d`?Megatron third_party ??? v0.3.2 ???????? `megatron-npu-v040-rebased.patch`????? Dockerfile?quick_install.sh ? quick_start.md ?? Megatron `1dcf0dafa`?? v0.4.0 MANIFEST ?????? `4b4acac9a1d28ea6829c8d4f566d75698a21249d`??????????? `4b4acac9` ???
 - ?????????????????????????????????? ARM64 CANN 9.0 ????????
+
+## 2026-10-22 correction: official v0.3.2 CANN 9.0 ARM64 bundle
+
+- The previous comparison used an outdated local v0.3.2 baseline (99b454d). The official `Ascend/slime-ascend` v0.3.2 branch is 282b6eb6409a0821293400fba3ddfe52fb5f9e01 and contains `docker/Dockerfile.a3.ubuntu22.04.cann900.latest`. Its CANN 9.0.0 / Python 3.12 / A3 aarch64 release bundle is `sgl-kernel-npu-torch2.10.0-py312-cann9.0-a3-aarch64.zip`; the user's URL and filename are correct.
+- Updated v0.4 Dockerfile, quick_install.sh, and existing docs/get_started/quick_start.md to use that exact bundle and the official SWR CANN 9.0 Python 3.12 base image. PyTorch is installed before SGLang. Only the patched torch-memory-saver wheel is rebuilt from the pinned source; kernel and DeepEP wheels come from the release bundle. No MindSpeed or MA patch application was added.
+- Existing v0.4 patch paths and pinned Megatron-LM baseline remain. No image build, install, UT, ST, or Nightly run was performed, per the user's instruction to finish format changes first. Next: build on A3 ARM64/CANN 9.0 and review logs when the user requests validation.

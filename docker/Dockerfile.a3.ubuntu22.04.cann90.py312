@@ -1,4 +1,4 @@
-FROM --platform=linux/arm64 quay.io/ascend/cann:9.0.0-a3-ubuntu22.04-py3.12
+FROM --platform=linux/arm64 swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.0.0-a3-ubuntu22.04-py3.12
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -23,6 +23,9 @@ RUN apt-get update -y && \
 COPY . /workspace/slime-ascend
 RUN python /workspace/slime-ascend/scripts/check_patch_manifest.py
 
+RUN pip install torch==2.10.0 torchvision==0.25.0 && \
+    pip install torch_npu==2.10.0.post4
+
 # 1. SGLang v0.5.15.post1.
 RUN git clone --depth 1 --branch v0.5.15.post1 https://github.com/sgl-project/sglang.git /workspace/sglang && \
     cd /workspace/sglang && git checkout v0.5.15.post1 && \
@@ -36,19 +39,26 @@ RUN git clone --depth 1 --branch v0.5.15.post1 https://github.com/sgl-project/sg
     pip install -e 'python[all_npu]'
 
 # 2. PyTorch, torch_npu, router and rollout dependencies.
-RUN pip install torch==2.10.0 torch_npu==2.10.0.post4 torchvision==0.25.0 \
-        pybind11==3.0.3 transformers==5.3.0 triton-ascend==3.2.1 memfabric-hybrid==1.0.8 && \
+RUN pip install pybind11==3.0.3 transformers==5.3.0 triton-ascend==3.2.1 memfabric-hybrid==1.0.8 && \
     pip install sglang-router==0.3.2 --force-reinstall && \
-    python -c 'import sglang_router'
+    python -c 'import sglang_router' && \
+    cd /tmp && \
+    wget --no-check-certificate https://gitcode.com/gcw_8jFUVqc5/sglang-kernel-npu-builds/releases/download/py312-cann9.0-a3/sgl-kernel-npu-torch2.10.0-py312-cann9.0-a3-aarch64.zip -O sgl-kernel-npu-a3.zip && \
+    unzip sgl-kernel-npu-a3.zip && \
+    pip install torch_memory_saver*.whl && \
+    pip install sgl_kernel_npu*.whl && \
+    pip install deep_ep*.whl && \
+    cd "$(pip show deep-ep | awk '/^Location:/ {print $2}')" && \
+    ln -s deep_ep/deep_ep_cpp*.so
 
-# 3. Build the A3 aarch64 NPU kernels for CANN 9.0.0 / Python 3.12.
-# The upstream CANN 9.0 release bundle is py311; this image compiles cp312 packages.
-RUN git clone https://github.com/sgl-project/sgl-kernel-npu.git /workspace/sgl-kernel-npu && \
-    cd /workspace/sgl-kernel-npu && git checkout 9765e27532b8f854717eba1d3fb9a0bb97a0c887 && \
+# 3. Rebuild only the patched torch-memory-saver wheel.
+RUN git clone https://github.com/sgl-project/sgl-kernel-npu.git /tmp/sgl-kernel-npu-src && \
+    cd /tmp/sgl-kernel-npu-src && git checkout 9765e27532b8f854717eba1d3fb9a0bb97a0c887 && \
     git am /workspace/slime-ascend/patches/third_party/sgl-kernel-npu/0001-fix-torch-memory-saver-allocation-lifecycle.patch \
            /workspace/slime-ascend/patches/third_party/sgl-kernel-npu/0002-fix-tms-sglang-cuda-graph-api-and-preload-mode.patch && \
-    bash build.sh && \
-    pip install ./python/deep_ep ./python/sgl_kernel_npu ./contrib/torch_memory_saver/python
+    cd contrib/torch_memory_saver/python && \
+    python3 setup.py clean --all && python3 setup.py bdist_wheel && \
+    pip install --force-reinstall dist/torch_memory_saver*.whl
 
 # 4. Megatron-LM, bridge and mbridge.
 RUN git clone https://github.com/ISEEKYAN/mbridge.git /workspace/mbridge && \

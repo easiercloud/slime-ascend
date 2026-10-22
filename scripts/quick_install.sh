@@ -14,6 +14,10 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
 cd "${DEPS_ROOT}"
 
+echo "0. install PyTorch and torch_npu"
+pip install torch==2.10.0 torchvision==0.25.0
+pip install torch_npu==2.10.0.post4
+
 echo "1. install SGLang from source"
 git clone --depth 1 --branch v0.5.15.post1 https://github.com/sgl-project/sglang.git
 cd sglang
@@ -30,21 +34,32 @@ pip install -e python[all_npu]
 cd ..
 
 echo "2. install torch & torch_npu & other basic packages"
-pip install torch==2.10.0 torch_npu==2.10.0.post4 torchvision==0.25.0 \
-    pybind11==3.0.3 transformers==5.3.0 triton-ascend==3.2.1
+pip install pybind11==3.0.3 transformers==5.3.0 triton-ascend==3.2.1
 pip install memfabric-hybrid==1.0.8
 pip install sglang-router==0.3.2 --force-reinstall
 python -c "import sglang_router"
 
-echo "3. build Python 3.12 / CANN 9.0.0 A3 aarch64 sgl-kernel-npu from source"
-git clone https://github.com/sgl-project/sgl-kernel-npu.git sgl-kernel-npu
-cd sgl-kernel-npu
+echo "3. install CANN 9.0 / Python 3.12 A3 aarch64 prebuilt kernel wheels"
+cd /tmp
+wget --no-check-certificate https://gitcode.com/gcw_8jFUVqc5/sglang-kernel-npu-builds/releases/download/py312-cann9.0-a3/sgl-kernel-npu-torch2.10.0-py312-cann9.0-a3-aarch64.zip -O sgl-kernel-npu-a3.zip
+unzip sgl-kernel-npu-a3.zip
+pip install torch_memory_saver*.whl
+pip install sgl_kernel_npu*.whl
+pip install deep_ep*.whl
+cd "$(pip show deep-ep | awk '/^Location:/ {print $2}')"
+ln -s deep_ep/deep_ep_cpp*.so
+
+echo "3a. rebuild only the patched torch-memory-saver wheel"
+git clone https://github.com/sgl-project/sgl-kernel-npu.git /tmp/sgl-kernel-npu-src
+cd /tmp/sgl-kernel-npu-src
 git checkout 9765e27532b8f854717eba1d3fb9a0bb97a0c887
 git am "${REPO_ROOT}"/patches/third_party/sgl-kernel-npu/0001-fix-torch-memory-saver-allocation-lifecycle.patch
 git am "${REPO_ROOT}"/patches/third_party/sgl-kernel-npu/0002-fix-tms-sglang-cuda-graph-api-and-preload-mode.patch
-bash build.sh
-pip install ./python/deep_ep ./python/sgl_kernel_npu ./contrib/torch_memory_saver/python
-cd ..
+cd contrib/torch_memory_saver/python
+python3 setup.py clean --all
+python3 setup.py bdist_wheel
+pip install --force-reinstall dist/torch_memory_saver*.whl
+cd "${DEPS_ROOT}"
 
 echo "4. install mbridge & Megatron-Bridge"
 git clone https://github.com/ISEEKYAN/mbridge.git 

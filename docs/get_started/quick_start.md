@@ -10,7 +10,7 @@
 
 | 组件 | A3 ARM64 构建版本 |
 | ---- | ---------------- |
-| 基础镜像 | `quay.io/ascend/cann:9.0.0-a3-ubuntu22.04-py3.12`（`linux/arm64`） |
+| 基础镜像 | `swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.0.0-a3-ubuntu22.04-py3.12`（`linux/arm64`） |
 | Python / CANN | 3.12 / 9.0.0 |
 | torch / torch_npu / torchvision | 2.10.0 / 2.10.0.post4 / 0.25.0 |
 | Megatron-LM | `4b4acac9a1d28ea6829c8d4f566d75698a21249d` |
@@ -19,13 +19,13 @@
 | Megatron-Bridge | `35b4ebfc486fb15dcc0273ceea804c3606be948a` |
 | mbridge | `89eb10887887bc74853f89a4de258c0702932a1c` |
 | SGLang | `v0.5.15.post1`（`0b3bb0cbe31873994c9f989fddfe2f87ca839fdd`） |
-| sgl-kernel-npu / torch-memory-saver / DeepEP | 从 `9765e27532b8f854717eba1d3fb9a0bb97a0c887` 源码构建 |
+| sgl-kernel-npu / torch-memory-saver / DeepEP | 使用 `py312-cann9.0-a3` 预编译包；仅从 `9765e27532b8f854717eba1d3fb9a0bb97a0c887` 重建已打补丁的 torch-memory-saver |
 | sglang-router / memfabric-hybrid | `0.3.2` / `1.0.8` |
 | transformers / triton-ascend | `5.3.0` / `3.2.1` |
 | nvidia-modelopt | `0.46.1` |
 | Slime submodule | `v0.4.0`（`0b0c277d5b4cc66efc3b6db269e2e5184e8f3b1e`） |
 
-CANN 9.0.0 的上游二进制发布包按 Python 3.11 构建。为保持本仓要求的 Python 3.12，Dockerfile 和安装脚本从固定源码提交构建 A3 ARM64 内核包，并应用仓库中实际存在的两份 torch-memory-saver 补丁。版本和补丁路径见 [Dockerfile](../../docker/Dockerfile.a3.ubuntu22.04.cann90.py312)、[quick_install.sh](../../scripts/quick_install.sh) 与 [MANIFEST.toml](../../patches/MANIFEST.toml)。此组合尚未完成整镜构建验证。
+CANN 9.0.0 / Python 3.12 / A3 ARM64 使用 [sgl-kernel-npu 预编译包](https://gitcode.com/gcw_8jFUVqc5/sglang-kernel-npu-builds/releases/download/py312-cann9.0-a3/sgl-kernel-npu-torch2.10.0-py312-cann9.0-a3-aarch64.zip)。仅对仓库中的 torch-memory-saver 补丁从固定源码重新打包。版本及补丁路径见 [Dockerfile](../../docker/Dockerfile.a3.ubuntu22.04.cann90.py312)、[quick_install.sh](../../scripts/quick_install.sh) 和 [MANIFEST.toml](../../patches/MANIFEST.toml)。本组合尚未完成整镜构建验证。
 
 ## 使用指南
 
