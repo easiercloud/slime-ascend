@@ -162,3 +162,9 @@
 - The previous comparison used an outdated local v0.3.2 baseline (99b454d). The official `Ascend/slime-ascend` v0.3.2 branch is 282b6eb6409a0821293400fba3ddfe52fb5f9e01 and contains `docker/Dockerfile.a3.ubuntu22.04.cann900.latest`. Its CANN 9.0.0 / Python 3.12 / A3 aarch64 release bundle is `sgl-kernel-npu-torch2.10.0-py312-cann9.0-a3-aarch64.zip`; the user's URL and filename are correct.
 - Updated v0.4 Dockerfile, quick_install.sh, and existing docs/get_started/quick_start.md to use that exact bundle and the official SWR CANN 9.0 Python 3.12 base image. PyTorch is installed before SGLang. Only the patched torch-memory-saver wheel is rebuilt from the pinned source; kernel and DeepEP wheels come from the release bundle. No MindSpeed or MA patch application was added.
 - Existing v0.4 patch paths and pinned Megatron-LM baseline remain. No image build, install, UT, ST, or Nightly run was performed, per the user's instruction to finish format changes first. Next: build on A3 ARM64/CANN 9.0 and review logs when the user requests validation.
+
+## 2026-10-23 PR conflict resolution
+
+- Compared the PR source branch against current public `Ascend/slime-ascend:dev` (2fd2677910ca33447fc6ef9449b95663ce6c2427). A shared merge base exists, but a three-way merge preview found conflicts across duplicate NPU test additions and overlapping setup/docs/patch files.
+- Merged upstream `dev` into the PR source branch and resolved overlapping hunks in favor of the existing v0.4 NPU source branch. The upstream `dev` tree is now included as a merge parent; the PR itself remains open and is not merged into `dev`.
+- The staged merge diff contains only upstream-added patch files and the upstream quick-install hunk. `git diff --check` reports whitespace in those upstream patch-format files; patch payloads were left unchanged. No image build or UT/ST/Nightly run was performed.

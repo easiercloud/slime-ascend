@@ -61,6 +61,18 @@ python3 setup.py bdist_wheel
 pip install --force-reinstall dist/torch_memory_saver*.whl
 cd "${DEPS_ROOT}"
 
+echo "3.1 rebuild torch-memory-saver with the registered lifecycle patch"
+git clone https://github.com/sgl-project/sgl-kernel-npu.git sgl-kernel-npu-src
+cd sgl-kernel-npu-src
+git checkout ${SGL_KERNEL_NPU_FIX_COMMIT}
+git am "${REPO_ROOT}"/patches/third_party/sgl-kernel-npu/0001-fix-torch-memory-saver-allocation-lifecycle.patch
+git am "${REPO_ROOT}"/patches/third_party/sgl-kernel-npu/0002-fix-tms-sglang-cuda-graph-api-and-preload-mode.patch
+cd contrib/torch_memory_saver/python
+python3 setup.py clean --all
+python3 setup.py bdist_wheel
+pip install --force-reinstall dist/torch_memory_saver*.whl
+cd ../../../..
+
 echo "4. install mbridge & Megatron-Bridge"
 git clone https://github.com/ISEEKYAN/mbridge.git 
 cd mbridge && git checkout 89eb10887887bc74853f89a4de258c0702932a1c
