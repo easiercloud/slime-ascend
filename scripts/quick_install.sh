@@ -58,6 +58,7 @@ cd /tmp/sgl-kernel-npu-src
 git checkout 9765e27532b8f854717eba1d3fb9a0bb97a0c887
 git am "${REPO_ROOT}"/patches/third_party/sgl-kernel-npu/0001-fix-torch-memory-saver-allocation-lifecycle.patch
 git am "${REPO_ROOT}"/patches/third_party/sgl-kernel-npu/0002-fix-tms-sglang-cuda-graph-api-and-preload-mode.patch
+git am "${REPO_ROOT}"/patches/third_party/sgl-kernel-npu/0003-fix-tms-unaligned-allocations-and-nested-regions.patch
 cd contrib/torch_memory_saver/python
 python3 setup.py clean --all
 python3 setup.py bdist_wheel

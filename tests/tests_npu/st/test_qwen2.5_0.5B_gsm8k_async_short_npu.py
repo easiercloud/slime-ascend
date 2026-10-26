@@ -12,8 +12,8 @@ def execute():
     os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
     os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
     os.environ["ASCEND_RT_VISIBLE_DEVICES"] = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
-    os.environ["HCCL_HOST_SOCKET_PORT_RANGE"] = "60000-60050"
-    os.environ["HCCL_NPU_SOCKET_PORT_RANGE"] = "61000-61050"
+    os.environ["HCCL_HOST_SOCKET_PORT_RANGE"] = os.environ.get("HCCL_HOST_SOCKET_PORT_RANGE", "60000-60050")
+    os.environ["HCCL_NPU_SOCKET_PORT_RANGE"] = os.environ.get("HCCL_NPU_SOCKET_PORT_RANGE", "61000-61050")
     os.environ["HYDRA_FULL_ERROR"] = "1"
     # ======================= NPU 环境变量 =======================
     asset_root = os.environ.get("SLIME_TEST_ASSET_ROOT", "/home/slime-ascend_CI/slime-ascend")

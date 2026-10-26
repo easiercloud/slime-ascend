@@ -192,3 +192,13 @@ summary = "补齐 SGLang 需要的 auto_dispatch_capture 参数，并确保子�
 issue = "SLIME-V031-005"
 base_commit = "9765e27532b8f854717eba1d3fb9a0bb97a0c887"
 sha256 = "0ebd52fbf54187ad11d8ae121aa17a1c572568856e02b0fc83ea8f068e6c2333"
+
+[[patches]]
+id = "sgl-kernel-npu:tms-unaligned-nested"
+category = "third_party"
+target = "sgl-kernel-npu"
+file = "sgl-kernel-npu/0003-fix-tms-unaligned-allocations-and-nested-regions.patch"
+summary = "Bypass VMM for unaligned ACL allocations and preserve nested TorchMemorySaver region state"
+issue = "SLIME-LATEST-TMS-001"
+base_commit = "9765e27532b8f854717eba1d3fb9a0bb97a0c887"
+sha256 = "2512396fe5213f3b9afde609eab033b841ba3edb61d8dd33488d994485975469"
