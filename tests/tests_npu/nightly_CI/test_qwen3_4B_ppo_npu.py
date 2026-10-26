@@ -100,7 +100,7 @@ megatron:
         "--rollout-num-gpus-per-engine 2 "
         "--rollout-num-gpus 8 "
         "--sglang-mem-fraction-static 0.4 "
-        "--sglang-disable-cuda-graph "
+        "--sglang-cuda-graph-max-bs 4 "
         "--sglang-max-running-requests 16 "
         "--sglang-enable-metrics "
     )
@@ -146,3 +146,4 @@ if __name__ == "__main__":
     for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         os.environ.pop(proxy_var, None)
     execute()
+

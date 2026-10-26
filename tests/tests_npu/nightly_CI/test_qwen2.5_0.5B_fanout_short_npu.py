@@ -123,9 +123,9 @@ def execute():
         "--global-batch-size 4 "
         "--balance-data "
         "--custom-generate-function-path "
-        "tests_npu.nightly_CI.fanout_test_helpers.compact_generate "
+        "slime.rollout._fanout_test_helpers.compact_generate "
         "--custom-reward-post-process-path "
-        "tests_npu.nightly_CI.fanout_test_helpers."
+        "slime.rollout._fanout_test_helpers."
         "grpo_normalize_by_group_index "
     )
 
@@ -162,7 +162,7 @@ def execute():
     sglang_args = (
         "--rollout-num-gpus-per-engine 1 "
         "--sglang-mem-fraction-static 0.4 "
-        "--sglang-disable-cuda-graph "
+        "--sglang-cuda-graph-max-bs 4 "
         "--sglang-enable-metrics "
         "--sglang-device npu "
     )

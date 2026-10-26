@@ -1,6 +1,0 @@
-CRON_TZ=Asia/Shanghai
-SHELL=/bin/bash
-PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
-# Biweekly upstream-sync automation: 1st and 16th of every month. Each run must rescan slime/tests/**/test_*.py dynamically.
-0 2 1,16 * * root set -a; source /etc/slime-upstream-sync.env; set +a; /opt/slime-ascend/.agents/skills/slime-upstream-sync/scripts/run_sync.py >>/var/log/slime-upstream-sync.log 2>&1

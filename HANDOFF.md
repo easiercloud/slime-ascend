@@ -168,3 +168,9 @@
 - Compared the PR source branch against current public `Ascend/slime-ascend:dev` (2fd2677910ca33447fc6ef9449b95663ce6c2427). A shared merge base exists, but a three-way merge preview found conflicts across duplicate NPU test additions and overlapping setup/docs/patch files.
 - Merged upstream `dev` into the PR source branch and resolved overlapping hunks in favor of the existing v0.4 NPU source branch. The upstream `dev` tree is now included as a merge parent; the PR itself remains open and is not merged into `dev`.
 - The staged merge diff contains only upstream-added patch files and the upstream quick-install hunk. `git diff --check` reports whitespace in those upstream patch-format files; patch payloads were left unchanged. No image build or UT/ST/Nightly run was performed.
+
+## 2026-10-26 PR scope cleanup: existing NPU tests and one sync skill
+
+- Removed the nine branch-added `tests/tests_npu/ut/*_v040_npu.py` files. Restored the 16 changed existing ST/Nightly CI files to the current upstream `dev` versions, so the PR uses slime-ascend's established UT/ST/Nightly suite instead of carrying v0.4-only test copies. This also removes a malformed f-string introduced in the branch's ST edit.
+- Kept exactly one skill file, `.agents/skills/slime-upstream-sync/SKILL.md`, and made it self-contained. Removed the auxiliary conversion/autofix skills, the sync skill's companion scripts/references/assets, and the generated `.upstream-sync` snapshot files. No repository code depends on those removed paths.
+- No UT, ST, Nightly, or image build run was performed for this scope cleanup. The next review should compare the PR's test and skill paths against `Ascend/slime-ascend:dev` and proceed with the already existing NPU CI suite when validation is requested.

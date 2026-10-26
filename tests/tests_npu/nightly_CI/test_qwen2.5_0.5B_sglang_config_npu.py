@@ -100,7 +100,7 @@ def execute():
         "--rollout-num-gpus-per-engine 1 "
         "--sglang-mem-fraction-static 0.7 "
         "--sglang-enable-metrics "
-        "--sglang-disable-cuda-graph "
+        "--sglang-cuda-graph-max-bs 32 "
         f"--sglang-config {config_path} "
     )
     sglang_args += "--sglang-device npu "
@@ -143,4 +143,5 @@ if __name__ == "__main__":
     os.environ.pop("HTTP_PROXY", None)
     os.environ.pop("HTTPS_PROXY", None)
     execute()
+
 

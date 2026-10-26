@@ -6,11 +6,8 @@ DATASETS_ROOT = "/home/slime-ascend_CI/slime-ascend/datasets"
 MEGATRON_WEIGHTS_ROOT = "/home/slime-ascend_CI/slime-ascend/weights-MA"
 
 ENABLE_EVAL = bool(int(os.environ.get("SLIME_TEST_ENABLE_EVAL", "1")))
-# CANN 9.1 in the current container does not export aclnnDispatchLayout;
-# keep the standard all-to-all dispatcher as the default.  DeepEP and FP8
-# remain explicit opt-ins for environments that provide their operators.
-USE_DEEPEP = bool(int(os.environ.get("SLIME_TEST_USE_DEEPEP", "0")))
-USE_FP8_ROLLOUT = bool(int(os.environ.get("SLIME_TEST_USE_FP8_ROLLOUT", "0")))
+USE_DEEPEP = bool(int(os.environ.get("SLIME_TEST_USE_DEEPEP", "1")))
+USE_FP8_ROLLOUT = bool(int(os.environ.get("SLIME_TEST_USE_FP8_ROLLOUT", "1")))
 
 MODEL_NAME = "Qwen3-30B-A3B"
 MODEL_TYPE = "qwen3-30B-A3B"
@@ -21,7 +18,7 @@ NUM_GPUS = 16
 def execute():
     if USE_FP8_ROLLOUT:
         ckpt_args = (
-            f"--hf-checkpoint {HF_WEIGHTS_ROOT}/{MODEL_NAME} "
+            f"--hf-checkpoint {HF_WEIGHTS_ROOT}/{MODEL_NAME}-FP8 "
             f"--ref-load {MEGATRON_WEIGHTS_ROOT}/{MODEL_NAME}_torch_dist "
         )
     else:
@@ -95,7 +92,7 @@ def execute():
         "--rollout-num-gpus 8 "
         "--rollout-num-gpus-per-engine 2 "
         "--sglang-mem-fraction-static 0.50 "
-        "--sglang-disable-cuda-graph "
+        "--sglang-cuda-graph-max-bs 4 "
         "--sglang-max-running-requests 16 "
         "--sglang-enable-metrics "
     )
@@ -149,3 +146,4 @@ if __name__ == "__main__":
     for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         os.environ.pop(proxy_var, None)
     execute()
+

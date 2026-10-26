@@ -1,4 +1,0 @@
-interface:
-  display_name: 'NPU Test Autofix'
-  short_description: '运行 Slime、VERL 等框架的 NPU 测试并最多五轮修复'
-  default_prompt: 'Use $npu-test-autofix to run this framework’s NPU tests, diagnose failures, repair them for up to five rounds, and report the pass rate.'

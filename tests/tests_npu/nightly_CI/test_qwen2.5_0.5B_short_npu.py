@@ -2,7 +2,7 @@ import os
 import slime.utils.external_utils.command_utils as U
 HF_WEIGHTS_ROOT = "/home/slime-ascend_CI/slime-ascend/weights"
 DATASETS_ROOT = "/home/slime-ascend_CI/slime-ascend/datasets"
-MEGATRON_WEIGHTS_ROOT = os.environ.get("SLIME_V040_MEGATRON_WEIGHTS_ROOT", "/home/slime-ascend_CI/slime-ascend/weights-MA")
+MEGATRON_WEIGHTS_ROOT = "/home/slime-ascend_CI/slime-ascend/weights-MA"
 
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
@@ -64,7 +64,7 @@ def execute():
     sglang_args = (
         "--rollout-num-gpus-per-engine 1 "
         "--sglang-mem-fraction-static 0.4 "
-        "--sglang-disable-cuda-graph "
+        "--sglang-cuda-graph-max-bs 4 "
         "--sglang-enable-metrics "
     )
     sglang_args += "--sglang-device npu "
@@ -114,4 +114,5 @@ if __name__ == "__main__":
     os.environ.pop("HTTP_PROXY")
     os.environ.pop("HTTPS_PROXY")
     execute()
+
 
