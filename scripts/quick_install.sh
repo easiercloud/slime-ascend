@@ -24,7 +24,7 @@ cd sglang
 git checkout v0.5.21
 test "$(git rev-parse HEAD)" = e00930c5489053f26d86b179cee0d087f846acbb
 for patch in sglang.patch sglang-top_p.patch sglang-release_hicache.patch sglang-pull_weights.patch sglang-deterministic.patch; do
-    git apply "${REPO_ROOT}/patches/third_party/sglang/v0.5.21/${patch}"
+    git apply "${REPO_ROOT}/patches/third_party/sglang/${patch}"
 done
 git add -A
 git -c user.name=slime-sync -c user.email=slime-sync@localhost commit -m 'Apply Slime v0.5.21 SGLang integration patches'

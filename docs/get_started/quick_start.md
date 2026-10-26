@@ -1,6 +1,6 @@
 # 昇腾（NPU）快速使用
 
-本文档从搭建环境开始，说明 Slime main@2026-10-26 的 NPU 环境、补丁构建和训练入口。
+本文档从搭建环境开始，说明 Slime main@2026-10-22 的 NPU 环境、补丁构建和训练入口。
 
 ## 硬件支持说明
 
@@ -23,9 +23,9 @@
 | sglang-router / memfabric-hybrid | `0.3.2` / `1.0.8` |
 | transformers / triton-ascend | `5.12.1` / `3.2.1` |
 | nvidia-modelopt | `0.46.1` |
-| Slime submodule | `main@2026-10-26` (`18868a79b0b083a093798a94ed0f8cb4f71b9c14`) |
+| Slime submodule | `main@2026-10-22` (`18868a79b0b083a093798a94ed0f8cb4f71b9c14`) |
 
-CANN 9.0.0 / Python 3.12 / A3 ARM64 使用 [sgl-kernel-npu 预编译包](https://gitcode.com/gcw_8jFUVqc5/sglang-kernel-npu-builds/releases/download/py312-cann9.0-a3/sgl-kernel-npu-torch2.10.0-py312-cann9.0-a3-aarch64.zip)。仅对仓库中的 torch-memory-saver 补丁从固定源码重新打包。版本及补丁路径见 [Dockerfile](../../docker/Dockerfile.a3.ubuntu22.04.cann90.py312)、[quick_install.sh](../../scripts/quick_install.sh) 和 [MANIFEST.toml](../../patches/MANIFEST.toml)。本组合尚未完成整镜构建验证。
+CANN 9.0.0 / Python 3.12 / A3 ARM64 使用 [sgl-kernel-npu 预编译包](https://gitcode.com/gcw_8jFUVqc5/sglang-kernel-npu-builds/releases/download/py312-cann9.0-a3/sgl-kernel-npu-torch2.10.0-py312-cann9.0-a3-aarch64.zip)。仅对仓库中的 torch-memory-saver 补丁从固定源码重新打包。版本及补丁路径见 [Dockerfile](../../docker/Dockerfile.a3.ubuntu22.04.cann900.latest)、[quick_install.sh](../../scripts/quick_install.sh) 和 [MANIFEST.toml](../../patches/MANIFEST.toml)。本组合尚未完成整镜构建验证。
 
 ## 使用指南
 
@@ -40,8 +40,8 @@ CANN 9.0.0 / Python 3.12 / A3 ARM64 使用 [sgl-kernel-npu 预编译包](https:/
 ```bash
 cd {slime-ascend-root-path}
 docker build --platform linux/arm64 \
-  -f docker/Dockerfile.a3.ubuntu22.04.cann90.py312 \
-  -t slime-ascend:9.0.0-a3-ubuntu22.04-py3.12-main-20261026 .
+  -f docker/Dockerfile.a3.ubuntu22.04.cann900.latest \
+  -t slime-ascend:9.0.0-a3-ubuntu22.04-py3.12-main-20261022 .
 ```
 
 ```bash
@@ -53,10 +53,10 @@ docker run -it --rm \
   -v /usr/local/Ascend/add-ons:/usr/local/Ascend/add-ons \
   -v "$(pwd)":/workspace/slime-ascend \
   -w /workspace/slime-ascend \
-  slime-ascend:9.0.0-a3-ubuntu22.04-py3.12-main-20261026
+  slime-ascend:9.0.0-a3-ubuntu22.04-py3.12-main-20261022
 ```
 
-Dockerfile 按 dev 和 v0.3.2 的分步格式安装 SGLang、PyTorch、NPU 内核、mbridge、Megatron-Bridge、Megatron-LM、MegatronAdaptor、TransformerEngineNPU 和 triton-ascend；对存在的 third_party 补丁逐个执行 `git am`，最后运行 `build.sh` 回放 Slime 补丁并安装项目。构建上下文须包含仓库 Git 元数据与 Slime submodule。
+Dockerfile 按分步格式安装 SGLang、PyTorch、NPU 内核、mbridge、Megatron-Bridge、Megatron-LM、MegatronAdaptor、TransformerEngineNPU 和 triton-ascend；对存在的 third_party 补丁逐个执行 `git am`，最后运行 `build.sh` 回放 Slime 补丁并安装项目。构建上下文须包含仓库 Git 元数据与 Slime submodule。
 
 ### 方式二：本地安装脚本
 
@@ -74,7 +74,7 @@ bash scripts/quick_install.sh
 
 ### 补丁构建（build.sh）
 
-`build.sh` 根据 [MANIFEST.toml](../../patches/MANIFEST.toml) 检查补丁文件和 SHA256，然后在 Slime main@2026-10-26 子模块上按顺序应用补丁：
+`build.sh` 根据 [MANIFEST.toml](../../patches/MANIFEST.toml) 检查补丁文件和 SHA256，然后在 Slime main@2026-10-22 子模块上按顺序应用补丁：
 
 ```bash
 bash build.sh --dry-run

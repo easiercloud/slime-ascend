@@ -95,7 +95,7 @@ git format-patch -1 HEAD --stdout > ../patches/npu-compat/existing.patch
 # CI 会自动执行，也可手动测试
 cd slime
 git fetch origin
-git checkout v0.4.0  # 新版本
+git checkout <upstream-commit>  # 目标版本
 
 # 尝试应用补丁
 cd ..

@@ -27,7 +27,7 @@ def main() -> int:
     import re
 
     for entrypoint in (
-        REPO_ROOT / "docker/Dockerfile.a3.ubuntu22.04.cann90.py312",
+        REPO_ROOT / "docker/Dockerfile.a3.ubuntu22.04.cann900.latest",
         REPO_ROOT / "scripts/quick_install.sh",
     ):
         for reference in set(re.findall(r"patches/third_party/[A-Za-z0-9_./-]+[.]patch", entrypoint.read_text())):

@@ -1,6 +1,6 @@
 # NPU validation matrix (2026-10-26)
 
-Baseline: branch `sync/slime-latest-20261026`, Slime `18868a79b0b083a093798a94ed0f8cb4f71b9c14`, SGLang v0.5.21, Megatron Core `4b4acac9a1d28ea6829c8d4f566d75698a21249d`.
+Baseline: branch `slime-latest-20261022`, Slime `18868a79b0b083a093798a94ed0f8cb4f71b9c14`, SGLang v0.5.21, Megatron Core `4b4acac9a1d28ea6829c8d4f566d75698a21249d`.
 
 Current validation host: x86_64 / CANN 9.1.0. The target A3 ARM64 / CANN 9.0.0 image has not been built or tested.
 
