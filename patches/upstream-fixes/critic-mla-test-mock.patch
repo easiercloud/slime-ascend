@@ -1,0 +1,31 @@
+From 3f531a69b9c9b5a87ac5bda666c48aafc0accc87 Mon Sep 17 00:00:00 2001
+From: Slime Ascend Sync <sync@local.invalid>
+Date: Mon, 26 Oct 2026 12:56:06 +0800
+Subject: [PATCH] Fix critic unit test Megatron MLA mock for latest source
+
+---
+ tests/test_model_provider_critic.py | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/tests/test_model_provider_critic.py b/tests/test_model_provider_critic.py
+index 1cc954d8..44613d5f 100644
+--- a/tests/test_model_provider_critic.py
++++ b/tests/test_model_provider_critic.py
+@@ -19,6 +19,9 @@ def _load_model_provider(monkeypatch):
+         "megatron.core.models.gpt": types.ModuleType("megatron.core.models.gpt"),
+         "megatron.core.models.gpt.gpt_layer_specs": types.ModuleType("megatron.core.models.gpt.gpt_layer_specs"),
+         "megatron.core.transformer": types.ModuleType("megatron.core.transformer"),
++        "megatron.core.transformer.multi_latent_attention": types.ModuleType(
++            "megatron.core.transformer.multi_latent_attention"
++        ),
+         "megatron.core.transformer.spec_utils": types.ModuleType("megatron.core.transformer.spec_utils"),
+         "megatron.core.transformer.transformer_config": types.ModuleType(
+             "megatron.core.transformer.transformer_config"
+@@ -33,6 +36,7 @@ def _load_model_provider(monkeypatch):
+     layer_specs.get_gpt_decoder_block_spec = lambda *args, **kwargs: None
+     layer_specs.get_gpt_layer_local_spec = lambda *args, **kwargs: None
+     layer_specs.get_gpt_layer_with_transformer_engine_spec = lambda *args, **kwargs: None
++    modules["megatron.core.transformer.multi_latent_attention"].MLASelfAttention = torch.nn.Module
+     modules["megatron.core.transformer.spec_utils"].import_module = lambda value: value
+     modules["megatron.core.transformer.transformer_config"].TransformerConfig = object
+     config = types.SimpleNamespace(hidden_size=HIDDEN, sequence_parallel=False, init_method_std=0.02)

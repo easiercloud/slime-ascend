@@ -1,0 +1,27 @@
+From 735c2aa43c303e0be88df0702036531522504b44 Mon Sep 17 00:00:00 2001
+From: Slime Ascend Sync <sync@local.invalid>
+Date: Mon, 26 Oct 2026 14:02:09 +0800
+Subject: [PATCH] Allow owned Ray test heads to cap CPU workers
+
+---
+ slime/utils/external_utils/command_utils.py | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/slime/utils/external_utils/command_utils.py b/slime/utils/external_utils/command_utils.py
+index f8279109..b0d5effd 100644
+--- a/slime/utils/external_utils/command_utils.py
++++ b/slime/utils/external_utils/command_utils.py
+@@ -132,10 +132,12 @@ def execute_train(
+         except subprocess.TimeoutExpired:
+             ray_running = False
+         if not ray_running:
++            ray_num_cpus = os.environ.get("SLIME_RAY_NUM_CPUS")
++            cpu_resources = f"--num-cpus {int(ray_num_cpus)}" if ray_num_cpus else ""
+             exec_command(
+                 f"export PYTHONUNBUFFERED=1 && "
+                 f"ray start --head --node-ip-address {master_addr} --port {ray_port} "
+-                f"--dashboard-port {ray_dashboard_port} {device_resources} --disable-usage-stats"
++                f"--dashboard-port {ray_dashboard_port} {device_resources} {cpu_resources} --disable-usage-stats"
+             )
+             # `ray start` can return before the dashboard job agent registers.
+             time.sleep(5)

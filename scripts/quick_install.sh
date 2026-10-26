@@ -19,22 +19,25 @@ pip install torch==2.10.0 torchvision==0.25.0
 pip install torch_npu==2.10.0.post4
 
 echo "1. install SGLang from source"
-git clone --depth 1 --branch v0.5.15.post1 https://github.com/sgl-project/sglang.git
+git clone --depth 1 --branch v0.5.21 https://github.com/sgl-project/sglang.git
 cd sglang
-git checkout v0.5.15.post1
-test "$(git rev-parse HEAD)" = 0b3bb0cbe31873994c9f989fddfe2f87ca839fdd
-git am "${REPO_ROOT}/patches/third_party/sglang/0001-slime-v0.5.15.post1-npu.patch" \
-    "${REPO_ROOT}/patches/third_party/sglang/0002-tms-adapter-forward-cuda-graph-arguments.patch"
+git checkout v0.5.21
+test "$(git rev-parse HEAD)" = e00930c5489053f26d86b179cee0d087f846acbb
+for patch in sglang.patch sglang-top_p.patch sglang-release_hicache.patch sglang-pull_weights.patch sglang-deterministic.patch; do
+    git apply "${REPO_ROOT}/patches/third_party/sglang/v0.5.21/${patch}"
+done
+git add -A
+git -c user.name=slime-sync -c user.email=slime-sync@localhost commit -m 'Apply Slime v0.5.21 SGLang integration patches'
+git am "${REPO_ROOT}/patches/third_party/sglang/0001-v0.5.21-tms-forward-graph-args.patch"
 mv python/pyproject.toml python/pyproject.toml.backup
 mv python/pyproject_npu.toml python/pyproject.toml
-# Keep SGLang's NPU metadata on the Megatron-Bridge tested transformers pin.
-sed -i 's/transformers==5.12.1/transformers==5.3.0/' python/pyproject.toml
-grep -q '"transformers==5.3.0"' python/pyproject.toml
+# SGLang v0.5.21 imports transformers.image_processing_backends (5.12.1).
+grep -q '"transformers==5.12.1"' python/pyproject.toml
 pip install -e python[all_npu]
 cd ..
 
 echo "2. install torch & torch_npu & other basic packages"
-pip install pybind11==3.0.3 transformers==5.3.0 triton-ascend==3.2.1
+pip install pybind11==3.0.3 transformers==5.12.1 triton-ascend==3.2.1
 pip install memfabric-hybrid==1.0.8
 pip install sglang-router==0.3.2 --force-reinstall
 python -c "import sglang_router"
@@ -60,18 +63,6 @@ python3 setup.py clean --all
 python3 setup.py bdist_wheel
 pip install --force-reinstall dist/torch_memory_saver*.whl
 cd "${DEPS_ROOT}"
-
-echo "3.1 rebuild torch-memory-saver with the registered lifecycle patch"
-git clone https://github.com/sgl-project/sgl-kernel-npu.git sgl-kernel-npu-src
-cd sgl-kernel-npu-src
-git checkout ${SGL_KERNEL_NPU_FIX_COMMIT}
-git am "${REPO_ROOT}"/patches/third_party/sgl-kernel-npu/0001-fix-torch-memory-saver-allocation-lifecycle.patch
-git am "${REPO_ROOT}"/patches/third_party/sgl-kernel-npu/0002-fix-tms-sglang-cuda-graph-api-and-preload-mode.patch
-cd contrib/torch_memory_saver/python
-python3 setup.py clean --all
-python3 setup.py bdist_wheel
-pip install --force-reinstall dist/torch_memory_saver*.whl
-cd ../../../..
 
 echo "4. install mbridge & Megatron-Bridge"
 git clone https://github.com/ISEEKYAN/mbridge.git 
@@ -107,7 +98,7 @@ pip install triton-ascend==3.2.1 \
     --trusted-host triton-ascend.osinfra.cn --no-cache-dir
 
 echo "7. install slime-ascend"
-# Keep the submodule on the official v0.4.0 commit and replay the registered
+# Keep the submodule on the pinned upstream main commit and replay the registered
 # format-patch series before installing the Python project.
 cd "${REPO_ROOT}"
 bash build.sh

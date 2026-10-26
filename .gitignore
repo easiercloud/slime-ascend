@@ -1,1 +1,4 @@
 .upstream-sync/
+
+__pycache__/
+*.pyc

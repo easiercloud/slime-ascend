@@ -1,20 +1,30 @@
-# Slime-Ascend v0.4.0 同步交接
+# Slime-Ascend upstream sync handoff (2026-10-26)
 
-更新日期：2026-10-26
-工作分支：`sync/slime-v040-dev-cleanup-20261020`
+## Baseline and isolation
 
-## 当前代码
+- Host: 192.168.13.185. Working branch: `sync/slime-latest-20261026` in `/home/c0088099/slime-ascend-latest-20261026`; container `slime-ascend-sync-20261026` uses the original image `slime-ascend:sync-20260911` and binds this repository at `/workspace/slime-ascend`.
+- Parent branch began at `5019106a52c0cfa3b4529abe3afa5fc9eda64be8`; the former Slime gitlink was v0.4.0 `0b0c277d5b4cc66efc3b6db269e2e5184e8f3b1e`. The candidate and new staged gitlink is THUDM/slime main `18868a79b0b083a093798a94ed0f8cb4f71b9c14`, obtained through GitHub API and verified by git fetch. The exact range has 22 commits and 339 changed files.
+- Ascend/slime-ascend dev baseline: `2fd2677910ca33447fc6ef9449b95663ce6c2427`. PR #135 belongs to the earlier v0.4.0 branch; no changes were pushed or merged in this run. No `TASK.md` was present in the relevant checkout.
+- This container is x86_64, CANN 9.1.0, Python 3.12.13. The maintained Dockerfile targets A3 ARM64, CANN 9.0.0, Python 3.12. Results here are not an A3 image build result.
 
-- Slime 子模块指向公开的 v0.4.0 提交 `0b0c277d5b4cc66efc3b6db269e2e5184e8f3b1e`。训练依赖采用 MegatronAdaptor 和 TransformerEngineNPU。
-- NPU 适配通过 `patches/MANIFEST.toml` 管理；已清理 Slime v0.4.0 自带能力所覆盖的重复补丁。`scripts/check_patch_manifest.py` 用于检查补丁路径和 SHA256。
-- Qwen2 HF 转换补丁 `qwen2-hf-converter-v040.patch` 持续保留；Qwen3.5 权重转换补丁 `qwen3_5.patch` 已恢复并登记到清单。
-- A3 ARM64 环境使用 CANN 9.0、Python 3.12、PyTorch 2.10.0 和 torch_npu 2.10.0.post4。`docker/Dockerfile.a3.ubuntu22.04.cann90.py312` 与 `scripts/quick_install.sh` 安装 CANN 9.0 / Python 3.12 的预编译 SGL 内核包；仅对带本仓补丁的 torch-memory-saver 重新构建 wheel。现有 `docs/get_started/quick_start.md` 已同步更新。
-- 已将上游 `Ascend/slime-ascend:dev`（`2fd2677910ca33447fc6ef9449b95663ce6c2427`）合入工作分支并解决 PR 冲突，合并提交为 `14b3ea5`。
-- PR 沿用上游 `dev` 的 NPU UT、ST 和 Nightly 用例；本分支新增的 9 个 `*_v040_npu.py` UT 已移除，原有 ST/Nightly 用例的本分支改动已撤回。Skill 仅保留 `.agents/skills/slime-upstream-sync/SKILL.md`，清理提交为 `ed7b351`。
+## Code and dependency changes
 
-## 已有检查记录
+- Rebased six Slime patches onto the exact main SHA: NPU adapter, allocator graph teardown, Megatron root override, Ray CPU cap, Qwen2 HF conversion, and upstream critic MLA test stub. `build.sh --skip-submodule` applied all six in the container. An independent replay worktree had the same final tree (`677fba1920c113292711f05e229e03c03841c34a`). Qwen3.5 converter already exists upstream; the old v0.4.0 Qwen3.5 patch changed normalization semantics and is archived. Old v0.4.0 patches are in `patches/archive/`.
+- Training remains MegatronAdaptor + TransformerEngineNPU; no MindSpeed. THUDM/slime v0.5.21 GPU image pins Megatron Core `4b4acac9a1d28ea6829c8d4f566d75698a21249d`, matching the current NPU Dockerfile and installer. Keep this exact SHA when validating on A3.
+- Inference now pins SGLang v0.5.21 `e00930c5489053f26d86b179cee0d087f846acbb`, matching Slime main. Five upstream Slime SGLang integration diffs are copied to `patches/third_party/sglang/v0.5.21/` in application order. A sixth local patch forwards TorchMemorySaver graph positional arguments. All six were applied from the manifest in clean worktree `/home/c0088099/sglang-v0521-replay-20261026`; its tree matches the reviewed integration checkout (`149108869b6ae25c6aae607cc0e4ffdb2f1f0273`). Two obsolete v0.5.15 SGLang patches are archived; their NPU expert parallel and Cohere decorator behavior is already present in v0.5.21.
+- SGLang v0.5.21 requires Transformers 5.12.1; 5.3.0 lacks `transformers.image_processing_backends`. Dockerfile, quick installer and Quick Start now use 5.12.1. The old duplicate TorchMemorySaver rebuild block with an undefined commit variable was removed from quick installer. The existing Megatron-Bridge patch was written for Transformers 5.3.0; full Bridge conversion compatibility with 5.12.1 remains unverified.
+- `patches/MANIFEST.toml` now registers 19 patches with SHA256. `scripts/check_patch_manifest.py` checks registered hashes and referenced build patches. The test map is `docs/upstream-sync/test-map-20261026.md`; `scripts/upstream_test_map.py` generated it from 59 changed Python upstream tests (49 CPU, 10 GPU). `.agents/skills/slime-upstream-sync/SKILL.md` describes the repeatable workflow.
 
-- 2026-10-20：从 Slime v0.4.0 tag 顺序回放 4 份 Slime 补丁成功；当时的补丁清单路径及 SHA256 检查通过。
-- 2026-10-16：隔离的 CANN 9.1 环境中，旧测试集合记录过 155 项 UT 通过；Qwen2.5-0.5B 异步 ST 退出码为 0。日志分别位于 `/tmp/slime-v040-all-npu-ut.log` 和 `/tmp/slime-v040-qwen05-async-st-20261016b.log`。这些是历史实验记录，所用测试集合与本次精简后的 PR 不同。
-- 2026-10-26：与上游 `dev` 比较，PR 不再新增或修改 `tests/tests_npu` 文件，且 `.agents/skills` 下仅有一份同步 Skill；GitCode 推送钩子通过。
-- 2026-10-26：Qwen3.5 补丁在隔离的 Slime v0.4.0 工作树中经 `git am` 回放成功；补丁清单校验通过，共登记 14 份补丁。
+## Validation and evidence
+
+- Slime patch replay and actual `bash build.sh --skip-submodule`: passed. Manifest: 19 registered patches verified. SGLang v0.5.21 integration replay: passed. Dockerfile full build: not run on this x86/CANN 9.1 host.
+- Selected patched-upstream CPU UT: 113 passed (`/tmp/slime-latest-selected-upstream-ut-20261026.log`). Existing NPU UT: 11 passed on the actual container checkout (`/tmp/slime-latest-actual-workspace-npu-ut-20261026.log`), then 11 passed again with Transformers 5.12.1 and v0.5.21 source (`/tmp/slime-latest-npu-ut-transformers5121-20261026.log`).
+- SGLang v0.5.21 Slime argument, weight-update compatibility and runtime UT: 41 passed after upgrading Transformers to 5.12.1 (`/tmp/slime-latest-sglang-v0521-ut-transformers5121-20261026.log`). The initial 5.3.0 run had 33 passes and 8 import errors (`/tmp/slime-latest-sglang-v0521-ut-20261026.log`); this is the evidence for changing the dependency pin. Megatron Core, Slime Megatron/SGLang module, and SGLang weight-update imports passed with 5.12.1.
+- Qwen2.5-0.5B asynchronous ST was attempted after earlier UT. The first run lacked `straw-queue` and the second used the image's wrong Megatron revision/checkpoint. After installing `straw-queue==0.1.3` and setting `SLIME_MEGATRON_ROOT=/home/c0088099/slime-v040-deps/Megatron-LM` (correct base plus NPU patch), optimizer initialization failed due HCCL OOM on an NPU already occupied by another VLLMWorker_TP task. Logs: `/tmp/slime-latest-qwen05-async-st-20261026.log`, `/tmp/slime-latest-qwen05-async-st-retry-20261026.log`, `/tmp/slime-latest-qwen05-async-st-depsfix-20261026.log`. NPU 0-7 still hold about 57 GB each. Do not stop those shared processes. Only owned Ray sessions were stopped. ST has no pass; Nightly was not run because the UT -> ST -> Nightly gate remains unmet.
+- The container had CPU PyTorch paired with CUDA torchvision, causing `torchvision::nms does not exist`. Only this new container was changed to `torchvision==0.25.0+cpu`. It also has `straw-queue==0.1.3` and `transformers==5.12.1` as local validation layer changes; this is not the A3 image.
+
+## Next actions
+
+1. Recheck NPU ownership and free HBM. Once the shared VLLM task has finished, run the existing asynchronous NPU ST using SGLang v0.5.21 and Transformers 5.12.1, then the existing Nightly case. Preserve logs and fix any actual code regression before progressing.
+2. Build the maintained Dockerfile on an A3 ARM64/CANN 9.0.0 host. Validate the prebuilt kernel wheels, TorchMemorySaver rebuild, and Megatron-Bridge conversion path with Transformers 5.12.1. Review the two upstream Megatron v0.5.21 GPU patches for applicable NPU behavior; the current NPU patch pins the same Megatron base commit but does not yet integrate all GPU changes.
+3. Keep the Slime gitlink at the upstream base SHA. `build.sh` changes the submodule worktree HEAD by replaying patches; stage only the base gitlink when committing the parent repository. Do not run a reset or broad `st_run.sh` cleanup in shared directories. No push or protected-branch merge has been authorized.

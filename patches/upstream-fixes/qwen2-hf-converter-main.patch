@@ -1,0 +1,39 @@
+From 6c5b19c66bd5f30504e53c9a58c218d4e366f680 Mon Sep 17 00:00:00 2001
+From: Slime Ascend Sync <sync@local.invalid>
+Date: Tue, 20 Oct 2026 11:26:44 +0800
+Subject: [PATCH] Preserve Qwen2 HF architecture settings during conversion
+
+---
+ tools/convert_hf_to_torch_dist.py | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/tools/convert_hf_to_torch_dist.py b/tools/convert_hf_to_torch_dist.py
+index 62207788..87f21085 100644
+--- a/tools/convert_hf_to_torch_dist.py
++++ b/tools/convert_hf_to_torch_dist.py
+@@ -41,6 +41,25 @@ def add_convertion_args(parser):
+ def get_args():
+     args = parse_args(add_convertion_args)
+     args = set_default_megatron_args(args)
++    from transformers import AutoConfig
++
++    hf_config = AutoConfig.from_pretrained(args.hf_checkpoint, trust_remote_code=True)
++    args.num_layers = getattr(hf_config, "num_hidden_layers", args.num_layers)
++    args.hidden_size = getattr(hf_config, "hidden_size", args.hidden_size)
++    args.num_attention_heads = getattr(hf_config, "num_attention_heads", args.num_attention_heads)
++    args.ffn_hidden_size = getattr(hf_config, "intermediate_size", args.ffn_hidden_size)
++    args.num_query_groups = getattr(hf_config, "num_key_value_heads", args.num_query_groups)
++    args.group_query_attention = args.num_query_groups != args.num_attention_heads
++    args.padded_vocab_size = getattr(hf_config, "vocab_size", args.padded_vocab_size)
++    if getattr(hf_config, "model_type", "") == "qwen2":
++        args.position_embedding_type = "rope"
++        args.rotary_base = getattr(hf_config, "rope_theta", args.rotary_base)
++        args.normalization = "RMSNorm"
++        args.norm_epsilon = hf_config.rms_norm_eps
++        args.layernorm_epsilon = hf_config.rms_norm_eps
++        args.add_bias_linear = False
++        args.add_qkv_bias = True
++        args.swiglu = True
+ 
+     # set to pass megatron validate_args
+     args.save_interval = 1

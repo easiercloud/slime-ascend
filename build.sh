@@ -185,7 +185,7 @@ PY
                 cd "${SLIME_DIR}"
                 if git am "$patch" > /dev/null 2>&1; then
                     echo "  ✓ ${patch_name}"
-                    ((patch_count++))
+                    ((patch_count+=1))
                 else
                     git am --abort > /dev/null 2>&1 || true
                     log_error "  失败: ${patch_name}"
@@ -194,7 +194,7 @@ PY
                 cd "${REPO_ROOT}"
             else
                 echo "  [DRY-RUN] 应用 ${patch_name}"
-                ((patch_count++))
+                ((patch_count+=1))
             fi
         fi
     done

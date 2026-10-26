@@ -26,20 +26,22 @@ RUN python /workspace/slime-ascend/scripts/check_patch_manifest.py
 RUN pip install torch==2.10.0 torchvision==0.25.0 && \
     pip install torch_npu==2.10.0.post4
 
-# 1. SGLang v0.5.15.post1.
-RUN git clone --depth 1 --branch v0.5.15.post1 https://github.com/sgl-project/sglang.git /workspace/sglang && \
-    cd /workspace/sglang && git checkout v0.5.15.post1 && \
-    test "$(git rev-parse HEAD)" = 0b3bb0cbe31873994c9f989fddfe2f87ca839fdd && \
-    git am /workspace/slime-ascend/patches/third_party/sglang/0001-slime-v0.5.15.post1-npu.patch \
-           /workspace/slime-ascend/patches/third_party/sglang/0002-tms-adapter-forward-cuda-graph-arguments.patch && \
+# 1. SGLang v0.5.21, matching THUDM/slime main.
+RUN git clone --depth 1 --branch v0.5.21 https://github.com/sgl-project/sglang.git /workspace/sglang && \
+    cd /workspace/sglang && git checkout v0.5.21 && \
+    test "$(git rev-parse HEAD)" = e00930c5489053f26d86b179cee0d087f846acbb && \
+    for patch in sglang.patch sglang-top_p.patch sglang-release_hicache.patch sglang-pull_weights.patch sglang-deterministic.patch; do \
+        git apply "/workspace/slime-ascend/patches/third_party/sglang/v0.5.21/${patch}" || exit; \
+    done && \
+    git add -A && git -c user.name=slime-sync -c user.email=slime-sync@localhost commit -m 'Apply Slime v0.5.21 SGLang integration patches' && \
+    git am /workspace/slime-ascend/patches/third_party/sglang/0001-v0.5.21-tms-forward-graph-args.patch && \
     mv python/pyproject.toml python/pyproject.toml.backup && \
     mv python/pyproject_npu.toml python/pyproject.toml && \
-    sed -i 's/transformers==5.12.1/transformers==5.3.0/' python/pyproject.toml && \
-    grep -q '"transformers==5.3.0"' python/pyproject.toml && \
+    grep -q '"transformers==5.12.1"' python/pyproject.toml && \
     pip install -e 'python[all_npu]'
 
 # 2. PyTorch, torch_npu, router and rollout dependencies.
-RUN pip install pybind11==3.0.3 transformers==5.3.0 triton-ascend==3.2.1 memfabric-hybrid==1.0.8 && \
+RUN pip install pybind11==3.0.3 transformers==5.12.1 triton-ascend==3.2.1 memfabric-hybrid==1.0.8 && \
     pip install sglang-router==0.3.2 --force-reinstall && \
     python -c 'import sglang_router' && \
     cd /tmp && \
@@ -82,7 +84,7 @@ RUN git clone https://gitcode.com/Ascend/MegatronAdaptor.git /workspace/Megatron
     cd /workspace/TransformerEngineNPU && git checkout 2b8529f94c3fd10497bf772bdc5b448b7ed4659a && \
     pip install -e .
 
-# 6. Triton and the Slime v0.4.0 patch series.
+# 6. Triton and the pinned Slime main patch series.
 RUN pip uninstall -y triton triton-ascend opencv-python && \
     pip install triton-ascend==3.2.1 \
         --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ \

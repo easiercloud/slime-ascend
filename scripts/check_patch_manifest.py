@@ -23,6 +23,16 @@ def main() -> int:
         actual = hashlib.sha256(path.read_bytes()).hexdigest()
         if actual != item["sha256"]:
             problems.append(f"sha256 mismatch: {path.relative_to(REPO_ROOT)}")
+    # Build entry points must never reference a patch absent from the checkout.
+    import re
+
+    for entrypoint in (
+        REPO_ROOT / "docker/Dockerfile.a3.ubuntu22.04.cann90.py312",
+        REPO_ROOT / "scripts/quick_install.sh",
+    ):
+        for reference in set(re.findall(r"patches/third_party/[A-Za-z0-9_./-]+[.]patch", entrypoint.read_text())):
+            if not (REPO_ROOT / reference).is_file():
+                problems.append(f"missing build patch: {reference} ({entrypoint.relative_to(REPO_ROOT)})")
     if problems:
         print("\n".join(problems), file=sys.stderr)
         return 1
