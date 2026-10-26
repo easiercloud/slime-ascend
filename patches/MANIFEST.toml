@@ -44,6 +44,16 @@ base_commit = "0b0c277d5b4cc66efc3b6db269e2e5184e8f3b1e"
 sha256 = "3a0a2dbe14776a18bc8196e930a2a6b75b2b517eab953a545368c6060dcb9b28"
 
 [[patches]]
+id = "slime:upstream-fixes:qwen3-5-conversion"
+category = "upstream-fixes"
+target = "slime"
+file = "qwen3_5.patch"
+summary = "Restore Qwen3.5/VL, GDN and MoE Megatron-to-HF weight mappings"
+issue = "SLIME-V032-013"
+base_commit = "0b0c277d5b4cc66efc3b6db269e2e5184e8f3b1e"
+sha256 = "6b3d0449970d176f252c3a79f377940da425f59cfdd1f561d7ed23c5673e72db"
+
+[[patches]]
 id = "mbridge:npu-device"
 category = "third_party"
 target = "mbridge"
