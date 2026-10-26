@@ -49,3 +49,9 @@
 - The user supplied `gcw_8jFUVqc5/slime-ascend` branch `v0.3.2-2` as the layout and style reference (exact reference SHA `9c56215f0cc1526b2b1baabba81b504a42b8f968`). The branch shares merge base `2fd2677910ca33447fc6ef9449b95663ce6c2427` with this work.
 - This branch is named `slime-latest-20261022`, using the date of the pinned upstream Slime commit (`18868a79...`, committed 2026-10-22). The Dockerfile was named `docker/Dockerfile.a3.ubuntu22.04.cann900.latest` to match the reference convention. SGLang integration patches were flattened under `patches/third_party/sglang/`; old superseded patch archives were removed from the active tree. No runtime patch content was changed by these moves.
 - The branch still records honest test status: 1/3 ST files and 1/18 Nightly CI files passed on x86/CANN 9.1. Full matrix and A3 ARM64/CANN 9.0 build remain outstanding. The private push does not imply full validation.
+
+## Private branch submission status
+
+- Final layout commit before push attempt: `81646be`; branch `slime-latest-20261022` points to the verified Slime SHA `18868a79b0b083a093798a94ed0f8cb4f71b9c14`. GitHub API reconfirmed this SHA as `main` on 2026-10-26.
+- `git push private HEAD:refs/heads/slime-latest-20261022` to `https://gitcode.com/gcw_8jFUVqc5/slime-ascend.git` was rejected by GitCode with HTTP 403 and message `You are not allowed to push code to this project` (request id `fzMvvfp9Du`). No remote branch was created by this attempt. GitCode SSH on port 22 timed out from this host. A writable credential or correct private remote is needed for publication; no token was requested in chat.
+- The local branch and commits remain intact. Manifest verification (20 patches), installer shell syntax, build dry run, and cached diff checks passed after layout changes. The Slime submodule worktree is expected to show modified because patch replay was validated there; the parent gitlink remains the pinned upstream SHA.
