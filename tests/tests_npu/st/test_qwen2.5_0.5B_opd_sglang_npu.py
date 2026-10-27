@@ -14,7 +14,7 @@ NUM_GPUS = 8
 NUM_TRAIN_GPUS = 7
 
 TEACHER_HOST = "127.0.0.1"
-TEACHER_PORT = 13141
+TEACHER_PORT = int(os.environ.get("SLIME_TEST_TEACHER_PORT", "13141"))
 
 
 def _teacher_url(path: str):
@@ -50,7 +50,7 @@ def setup_model_symlink():
 def _get_gpu_split():
     """Split available GPUs between Ray and teacher."""
     all_gpus = os.environ.get(
-        "CUDA_VISIBLE_DEVICES",
+        "ASCEND_RT_VISIBLE_DEVICES",
         ",".join(str(i) for i in range(NUM_GPUS)),
     ).split(",")
 
@@ -72,7 +72,7 @@ def _launch_teacher_server(teacher_gpu: str):
     env["GLOO_SOCKET_IFNAME"] = "lo"
     env["NCCL_SOCKET_IFNAME"] = "lo"
     env["TP_SOCKET_IFNAME"] = "lo"
-    log_path = "/tmp/sglang_teacher.log"
+    log_path = os.environ.get("SLIME_TEST_TEACHER_LOG", "/tmp/sglang_teacher.log")
     log_file = open(log_path, "w")
     process = subprocess.Popen(
         [
@@ -80,7 +80,7 @@ def _launch_teacher_server(teacher_gpu: str):
             "-m",
             "sglang.launch_server",
             "--model-path",
-            f"/home/slime-ascend_CI/slime-ascend/weights/Qwen2.5-0.5B-Instruct",
+            os.environ.get("SLIME_TEST_HF_CHECKPOINT", "/home/slime-ascend_CI/slime-ascend/weights/Qwen2.5-0.5B-Instruct"),
             "--host",
             "0.0.0.0",
             "--port",
@@ -122,8 +122,8 @@ def execute():
     os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
     os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
     os.environ["ASCEND_RT_VISIBLE_DEVICES"] = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
-    os.environ["HCCL_HOST_SOCKET_PORT_RANGE"] = "60000-60050"
-    os.environ["HCCL_NPU_SOCKET_PORT_RANGE"] = "61000-61050"
+    os.environ["HCCL_HOST_SOCKET_PORT_RANGE"] = os.environ.get("HCCL_HOST_SOCKET_PORT_RANGE", "60000-60050")
+    os.environ["HCCL_NPU_SOCKET_PORT_RANGE"] = os.environ.get("HCCL_NPU_SOCKET_PORT_RANGE", "61000-61050")
     os.environ["HYDRA_FULL_ERROR"] = "1"
     # ======================= NPU 环境变量 =======================
     train_gpus, teacher_gpu = _get_gpu_split()
@@ -138,7 +138,10 @@ def execute():
         teacher_process = _launch_teacher_server(teacher_gpu)
 
     try:
-        ckpt_args = f"--hf-checkpoint /home/slime-ascend_CI/slime-ascend/weights/Qwen2.5-0.5B-Instruct " f"--ref-load /home/slime-ascend_CI/slime-ascend/weights-MA/Qwen2.5-0.5B-Instruct_torch_dist --use-dist-ckpt "
+        asset_root = os.environ.get("SLIME_TEST_ASSET_ROOT", "/home/slime-ascend_CI/slime-ascend")
+        hf_checkpoint = os.environ.get("SLIME_TEST_HF_CHECKPOINT", f"{asset_root}/weights/Qwen2.5-0.5B-Instruct")
+        ref_load = os.environ.get("SLIME_TEST_REF_LOAD", f"{asset_root}/weights-MA/Qwen2.5-0.5B-Instruct_torch_dist")
+        ckpt_args = f"--hf-checkpoint {hf_checkpoint} --ref-load {ref_load} --use-dist-ckpt "
 
         rollout_args = (
             "--prompt-data /home/slime-ascend_CI/slime-ascend/datasets/gsm8k/train.parquet "
@@ -255,11 +258,9 @@ def execute():
         if teacher_process:
             teacher_process.kill()
             teacher_process.wait()
-        U.exec_command("pkill -9 sglang; true")
 
 
 if __name__ == "__main__":
-    setup_model_symlink()
     for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         os.environ.pop(proxy_var, None)
     execute()

@@ -23,12 +23,11 @@ NUM_ROLLOUT = 4
 def _common_args(debug_data_dir: str):
     """Arguments shared by both phases."""
 
-    ckpt_args = (
-            "--hf-checkpoint /home/slime-ascend_CI/slime-ascend/weights/Qwen2.5-0.5B-Instruct "
-            "--ref-load /home/slime-ascend_CI/slime-ascend/weights-MA/Qwen2.5-0.5B-Instruct_torch_dist "
-            "--use-dist-ckpt "
-        )
-    
+    asset_root = os.environ.get("SLIME_TEST_ASSET_ROOT", "/home/slime-ascend_CI/slime-ascend")
+    hf_checkpoint = os.environ.get("SLIME_TEST_HF_CHECKPOINT", f"{asset_root}/weights/Qwen2.5-0.5B-Instruct")
+    ref_load = os.environ.get("SLIME_TEST_REF_LOAD", f"{asset_root}/weights-MA/Qwen2.5-0.5B-Instruct_torch_dist")
+    ckpt_args = f"--hf-checkpoint {hf_checkpoint} --ref-load {ref_load} --use-dist-ckpt "
+
     rollout_args = (
         "--prompt-data /home/slime-ascend_CI/slime-ascend/datasets/gsm8k/train.parquet "
         "--input-key question "   # 提取问题列
@@ -149,8 +148,8 @@ def execute():
     os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
     os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
     os.environ["ASCEND_RT_VISIBLE_DEVICES"] = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
-    os.environ["HCCL_HOST_SOCKET_PORT_RANGE"] = "60000-60050"
-    os.environ["HCCL_NPU_SOCKET_PORT_RANGE"] = "61000-61050"
+    os.environ["HCCL_HOST_SOCKET_PORT_RANGE"] = os.environ.get("HCCL_HOST_SOCKET_PORT_RANGE", "60000-60050")
+    os.environ["HCCL_NPU_SOCKET_PORT_RANGE"] = os.environ.get("HCCL_NPU_SOCKET_PORT_RANGE", "61000-61050")
     os.environ["HYDRA_FULL_ERROR"] = "1"
     # ======================= NPU 环境变量 =======================
     debug_data_dir = tempfile.mkdtemp(prefix="slime_debug_rollout_")

@@ -8,9 +8,9 @@ Current validation host: x86_64 / CANN 9.1.0. The target A3 ARM64 / CANN 9.0.0 i
 | --- | --- | ---: | --- |
 | ut | `test_npu_accelerator_cache.py` | CPU | PASS |
 | ut | `test_ppo_utils_npu.py` | CPU | PASS |
-| st | `test_qwen2.5_0.5B_debug_rollout_then_train_npu.py` | 8 | PENDING |
+| st | `test_qwen2.5_0.5B_debug_rollout_then_train_npu.py` | 8 | PASS |
 | st | `test_qwen2.5_0.5B_gsm8k_async_short_npu.py` | 8 | PASS |
-| st | `test_qwen2.5_0.5B_opd_sglang_npu.py` | 8 | PENDING |
+| st | `test_qwen2.5_0.5B_opd_sglang_npu.py` | 8 | BLOCKED: occupied NPU, teacher OOM |
 | nightly_CI | `test_mimo_7B_mtp_only_grad_npu.py` | 16 | PENDING |
 | nightly_CI | `test_ppo_logprob_entropy_gpu_npu.py` | 2 | PENDING |
 | nightly_CI | `test_quick_start_glm4_9B_npu.py` | 8 | PENDING |
@@ -41,3 +41,5 @@ At this audit all 16 physical NPUs are occupied by another `mindspeed_bridge` tr
 Asset audit: `/home/data/weights` contains the HF model directories, and `/home/data/datasets` contains the listed datasets. The default CI Megatron checkpoint root `/home/slime-ascend_CI/slime-ascend/weights-MA` is absent; only the Qwen2.5-0.5B checkpoint exists at `/home/c0088099/slime-v040-work/weights-MA/Qwen2.5-0.5B-Instruct_torch_dist`. Other cases need their exact checkpoints created or configured before execution.
 
 Run remaining ST cases before remaining Nightly cases when the cards are free, selecting isolated NPU IDs, Ray ports and HCCL ports. Preserve logs and update this matrix case by case. Do not use `st_run.sh` because it contains broad process cleanup.
+
+2026-10-27 continuation: current NPU UT rerun passed 11/11 (`/tmp/slime-latest-npu-ut-20261027.log`). Debug rollout then train passed both phases (Ray job `raysubmit_khG2N2XSs2SyYMsw`, `/tmp/slime-latest-debug-st-npu8-15-20261027.log`). OPD ST failed when its teacher exhausted NPU memory (`/tmp/slime-latest-opd-st-npu8-15-20261027.log`; teacher log inside the container at `/tmp/slime-latest-opd-teacher-20261027.log`). Another user's `mindspeed_bridge` job PID 3802373-3802388 was using all 16 physical NPUs before that OPD run; it was not stopped. This OPD result does not establish a code regression. The isolated Ray instance was stopped after failure. The sync skill now requires an actual occupancy gate before every device test. Nightly continuation waits for unoccupied devices; prior Nightly short PASS remains valid for the earlier run.
