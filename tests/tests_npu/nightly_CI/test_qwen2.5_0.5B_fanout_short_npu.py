@@ -20,10 +20,8 @@ this test, **no e2e training run had ever exercised the full chain**:
        num_rollouts (not num_samples), keeping grad magnitude stable
        independent of fan-out
 
-The fan-out function itself lives in
-``slime/rollout/_fanout_test_helpers.py`` — it has to be at a dot-free
-module path so ``importlib.import_module`` can resolve the string
-``--custom-generate-function-path`` flag (this filename has dots).
+The fan-out function lives in this test directory's
+``fanout_test_helpers.py``, loaded by the Ray job through ``PYTHONPATH``.
 
 Test choices
 ------------
@@ -43,6 +41,9 @@ import os
 import tempfile
 
 import slime.utils.external_utils.command_utils as U
+
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+os.environ["PYTHONPATH"] = os.pathsep.join(filter(None, (TESTS_DIR, os.environ.get("PYTHONPATH"))))
 HF_WEIGHTS_ROOT = os.environ.get(
     "SLIME_TEST_HF_WEIGHTS_ROOT",
     "/home/data/weights",
@@ -123,9 +124,9 @@ def execute():
         "--global-batch-size 4 "
         "--balance-data "
         "--custom-generate-function-path "
-        "slime.rollout._fanout_test_helpers.compact_generate "
+        "fanout_test_helpers.compact_generate "
         "--custom-reward-post-process-path "
-        "slime.rollout._fanout_test_helpers."
+        "fanout_test_helpers."
         "grpo_normalize_by_group_index "
     )
 

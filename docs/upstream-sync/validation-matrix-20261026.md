@@ -10,14 +10,14 @@ Current validation host: x86_64 / CANN 9.1.0. The target A3 ARM64 / CANN 9.0.0 i
 | ut | `test_ppo_utils_npu.py` | CPU | PASS |
 | st | `test_qwen2.5_0.5B_debug_rollout_then_train_npu.py` | 8 | PASS |
 | st | `test_qwen2.5_0.5B_gsm8k_async_short_npu.py` | 8 | PASS |
-| st | `test_qwen2.5_0.5B_opd_sglang_npu.py` | 8 | BLOCKED: occupied NPU, teacher OOM |
+| st | `test_qwen2.5_0.5B_opd_sglang_npu.py` | 8 | PASS |
 | nightly_CI | `test_mimo_7B_mtp_only_grad_npu.py` | 16 | PENDING |
-| nightly_CI | `test_ppo_logprob_entropy_gpu_npu.py` | 2 | PENDING |
+| nightly_CI | `test_ppo_logprob_entropy_gpu_npu.py` | 2 | PASS (13 tests) |
 | nightly_CI | `test_quick_start_glm4_9B_npu.py` | 8 | PENDING |
-| nightly_CI | `test_qwen2.5_0.5B_fanout_short_npu.py` | 4 | PENDING |
-| nightly_CI | `test_qwen2.5_0.5B_fully_async_short_npu.py` | 4 | PENDING |
+| nightly_CI | `test_qwen2.5_0.5B_fanout_short_npu.py` | 4 | PASS |
+| nightly_CI | `test_qwen2.5_0.5B_fully_async_short_npu.py` | 4 | PASS |
 | nightly_CI | `test_qwen2.5_0.5B_sglang_config_distributed_npu.py` | 8 | PENDING |
-| nightly_CI | `test_qwen2.5_0.5B_sglang_config_npu.py` | 8 | PENDING |
+| nightly_CI | `test_qwen2.5_0.5B_sglang_config_npu.py` | 8 | FAIL: TMS aclrtUnmapMem |
 | nightly_CI | `test_qwen2.5_0.5B_short_npu.py` | 4 | PASS |
 | nightly_CI | `test_qwen3_0.6B_parallel_check_npu.py` | 8 | PENDING |
 | nightly_CI | `test_qwen3_30B_A3B_npu.py` | 16 | PENDING |
@@ -43,3 +43,5 @@ Asset audit: `/home/data/weights` contains the HF model directories, and `/home/
 Run remaining ST cases before remaining Nightly cases when the cards are free, selecting isolated NPU IDs, Ray ports and HCCL ports. Preserve logs and update this matrix case by case. Do not use `st_run.sh` because it contains broad process cleanup.
 
 2026-10-27 continuation: current NPU UT rerun passed 11/11 (`/tmp/slime-latest-npu-ut-20261027.log`). Debug rollout then train passed both phases (Ray job `raysubmit_khG2N2XSs2SyYMsw`, `/tmp/slime-latest-debug-st-npu8-15-20261027.log`). OPD ST failed when its teacher exhausted NPU memory (`/tmp/slime-latest-opd-st-npu8-15-20261027.log`; teacher log inside the container at `/tmp/slime-latest-opd-teacher-20261027.log`). Another user's `mindspeed_bridge` job PID 3802373-3802388 was using all 16 physical NPUs before that OPD run; it was not stopped. This OPD result does not establish a code regression. The isolated Ray instance was stopped after failure. The sync skill now requires an actual occupancy gate before every device test. Nightly continuation waits for unoccupied devices; prior Nightly short PASS remains valid for the earlier run.
+
+Later on 2026-10-27: OPD ST passed with an actual empty-device gate (Ray `raysubmit_W7wxccvBhGNvFNz8`, `/tmp/slime-latest-opd-st-retry-npu8-15-20261027.log`), making ST 3/3. PPO parity Nightly passed 13/13 (`/tmp/slime-latest-ppo-parity-nightly-npu8-9-20261027.log`). Fanout Nightly passed after pointing its Ray import to the existing `tests/tests_npu/nightly_CI/fanout_test_helpers.py` (`/tmp/slime-latest-fanout-nightly-retry-npu8-11-20261027.log`). Fully async Nightly passed after bounding the smoke case to 16 concurrent requests and 1024 response tokens (`/tmp/slime-latest-fully-async-nightly-retry-npu8-11-20261027.log`); the preceding default-512-concurrency run had 384 in-flight tasks at cleanup and timed out. SGLang config Nightly failed during colocate memory release with `aclrtUnmapMem failed` in TorchMemorySaver `pause`, log `/tmp/slime-latest-sglang-config-nightly-npu8-15-20261027.log`; the stuck Ray instance was stopped in this isolated container. Current Nightly is 4/18 passing; its other cases are not established by these results.
