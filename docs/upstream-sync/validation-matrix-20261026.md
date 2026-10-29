@@ -11,7 +11,7 @@ Current validation host: x86_64 / CANN 9.1.0. The target A3 ARM64 / CANN 9.0.0 i
 | st | `test_qwen2.5_0.5B_debug_rollout_then_train_npu.py` | 8 | PASS |
 | st | `test_qwen2.5_0.5B_gsm8k_async_short_npu.py` | 8 | PASS |
 | st | `test_qwen2.5_0.5B_opd_sglang_npu.py` | 8 | PASS |
-| nightly_CI | `test_mimo_7B_mtp_only_grad_npu.py` | 16 | FAIL: rerun 2026-10-29; gradient isolation passed (11 MTP / 0 non-MTP params), MTP loss 13.083 > 1.0. HF-to-Megatron MTP tensors verified bit-exact; investigate NPU MTP hidden-state/label/mask path; threshold unchanged. Log `/tmp/slime-latest-mimo-7b-graph-disabled-nightly-20261029.log`. |
+| nightly_CI | `test_mimo_7B_mtp_only_grad_npu.py` | 16 | FAIL: latest captured run reports MTP loss 12.882 > 1.0; gradient isolation passes (11 MTP / 0 non-MTP params). HF-to-Megatron MTP tensors are bit-exact, and all 256 active labels match input IDs shifted left by one. No new NPU rerun in this organization pass. Log `/tmp/slime-latest-mimo-7b-mtp-capture-20261029.log`. |
 | nightly_CI | `test_ppo_logprob_entropy_gpu_npu.py` | 2 | PASS (13 tests) |
 | nightly_CI | `test_quick_start_glm4_9B_npu.py` | 8 | PASS (AIME eval; CPU optimizer offload, 2048 tokens/GPU) |
 | nightly_CI | `test_qwen2.5_0.5B_fanout_short_npu.py` | 4 | PASS |

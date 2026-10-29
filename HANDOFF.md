@@ -166,3 +166,10 @@ Qwen3-4B critic-only Nightly (2026-10-29) passed with `--sglang-disable-cuda-gra
 - Final Nightly evidence remains 16 PASS, 1 FAIL, 1 PARTIAL on x86_64/CANN 9.1.0. No new NPU run is required for this delivery; A3 ARM64/CANN 9.0.0 remains unvalidated. Push the authorized branch only, with no merge.
 
 - Delivery pushed to GitCode private repository `https://gitcode.com/gcw_8jFUVqc5/slime-ascend` on branch `2026-10-22`. The initial delivery commit is `3cae046e0c2a1668dbacfb7602fda93daca935f6`; GitCode hooks passed and a new remote branch was created. No merge request was created and no branch was merged. Access credentials are intentionally not recorded here.
+
+
+2026-10-29 organization follow-up:
+
+- User confirmed that CUDA Graph disabling and similar test launch/configuration adjustments should remain direct edits in the existing NPU test scripts; they do not need standalone patch files. No startup-script patch was added to `patches/` or `MANIFEST.toml`. The two async checkpoint patches remain registered because they modify third-party source code and were required for the passing async checkpoint Nightly.
+- MiMo remains an acknowledged Nightly failure, with no additional NPU rerun requested for this organization pass. The latest saved capture records loss 12.882; labels at all 256 active positions match the one-token left shift of `input_ids`. HF MTP weights remain bit-exact to the source checkpoint.
+- The current pushed private branch is `2026-10-22`, matching the upstream Slime target date; the delivery commit is `3cae046e0c2a1668dbacfb7602fda93daca935f6`, followed by delivery-record commit `c9694f358ee569e4a59382a21adf8105b9c201b7`. No merge was performed.
