@@ -207,3 +207,9 @@ Qwen3-4B critic-only Nightly (2026-10-29) passed with `--sglang-disable-cuda-gra
 - All three ran on physical NPU IDs 8–15 after occupancy checks; physical IDs 0–7 were occupied by another VLLM task during later checks and were left untouched. Existing CUDA Graph options were kept because these cases did not fail; the first test captured NPU decode graphs successfully.
 - SGLang emitted retries to an unreachable /freeze_gc endpoint on ports 15002/15004, but the rollout services became ready and all associated Ray jobs succeeded. These messages did not fail the tests.
 - Result applies to this x86/CANN 9.1 overlay experiment only. It does not prove the A3 ARM64 installer/image combination or the unretrieved TransformerEngineNPU pin. No production dependency files were modified by this validation step.
+
+## 2026-10-29 Triton-Ascend pin alignment
+
+- Changed only Triton-Ascend references in scripts/quick_install.sh, docker/Dockerfile.a3.ubuntu22.04.cann910.latest and docs/get_started/quick_start.md from 3.2.2 to 3.2.1, matching the user-approved x86/CANN 9.1 ST runtime. Other dependency versions and install steps were left unchanged.
+- The Python 3.12 AArch64 wheel filename is triton_ascend-3.2.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl and matches official Triton-Ascend 3.2.1 release examples. The ARM image itself has not been built or runtime-tested.
+- Validation: bash -n scripts/quick_install.sh and git diff --check passed; installer and Dockerfile URLs reference v3.2.1.

@@ -37,7 +37,7 @@ pip install -e python[all_npu]
 cd ..
 
 echo "2. install torch & torch_npu & other basic packages"
-pip install pybind11==3.0.3 transformers==5.12.1 https://github.com/triton-lang/triton-ascend/releases/download/v3.2.2/triton_ascend-3.2.2-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl
+pip install pybind11==3.0.3 transformers==5.12.1 https://github.com/triton-lang/triton-ascend/releases/download/v3.2.1/triton_ascend-3.2.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl
 pip install https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/mf/v1.2.1/20260923.4/memfabric_hybrid-1.2.1-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl memfabric-zbal==1.1.3
 pip install sglang-router==0.3.2 --force-reinstall
 python -c "import sglang_router"
@@ -97,7 +97,7 @@ pip install -e . && cd ..
 
 echo "6. install triton_ascend"
 pip uninstall triton triton_ascend -y
-pip install https://github.com/triton-lang/triton-ascend/releases/download/v3.2.2/triton_ascend-3.2.2-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl --no-cache-dir
+pip install https://github.com/triton-lang/triton-ascend/releases/download/v3.2.1/triton_ascend-3.2.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl --no-cache-dir
 
 echo "7. install slime-ascend"
 # Keep the submodule on the pinned upstream main commit and replay the registered

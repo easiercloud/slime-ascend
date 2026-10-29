@@ -22,7 +22,7 @@
 | sgl-kernel-npu / torch-memory-saver / DeepEP | 社区 `2026.9.0.post11` 的 `py312-cann9.1.0-a3-aarch64` 预编译包（SHA256 校验）；仅从 `9765e27532b8f854717eba1d3fb9a0bb97a0c887` 重建已打补丁的 torch-memory-saver |
 | sglang-router / memfabric-hybrid | `0.3.2` / `1.2.1` |
 | memfabric-zbal | 1.1.3 (aarch64) |
-| transformers / triton-ascend | `5.12.1` / `3.2.2` |
+| transformers / triton-ascend | `5.12.1` / `3.2.1` |
 | nvidia-modelopt | `0.46.1` |
 | Slime submodule | `main@2026-10-22` (`18868a79b0b083a093798a94ed0f8cb4f71b9c14`) |
 
