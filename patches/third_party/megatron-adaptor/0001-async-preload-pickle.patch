@@ -1,0 +1,13 @@
+From: Slime Ascend Sync <sync@localhost>
+Date: Wed, 28 Oct 2026 12:00:00 +0800
+Subject: [PATCH] Make async checkpoint preload function pickleable
+
+---
+diff --git a/megatron_adaptor/patches/megatron/megatron_basic.py b/megatron_adaptor/patches/megatron/megatron_basic.py
+index fbeb1ab..181cffd 100644
+--- a/megatron_adaptor/patches/megatron/megatron_basic.py
++++ b/megatron_adaptor/patches/megatron/megatron_basic.py
+@@ -167,3 +166,2 @@ def forward_fused_softmax(self, input_, mask):
+-@staticmethod
+ def preload_tensors(write_buckets, non_blocking=True):
+     """Stage to-be-written tensors into host memory during async checkpoint save.

@@ -14,7 +14,7 @@
 | Python / CANN | 3.12 / 9.0.0 |
 | torch / torch_npu / torchvision | 2.10.0 / 2.10.0.post4 / 0.25.0 |
 | Megatron-LM | `4b4acac9a1d28ea6829c8d4f566d75698a21249d` |
-| MegatronAdaptor | `f707a3b6eb9981532c3419c08ea40a8bb5962af5` |
+| MegatronAdaptor | `eb0e5043438dd753099432bc3b3d8e5916ed1844` |
 | TransformerEngineNPU | `2b8529f94c3fd10497bf772bdc5b448b7ed4659a` |
 | Megatron-Bridge | `35b4ebfc486fb15dcc0273ceea804c3606be948a` |
 | mbridge | `89eb10887887bc74853f89a4de258c0702932a1c` |

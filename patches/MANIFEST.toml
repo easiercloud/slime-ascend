@@ -114,6 +114,26 @@ base_commit = "4b4acac9a1d28ea6829c8d4f566d75698a21249d"
 sha256 = "8a10c404aaad751d6f6c0254382730a940c7f2be468483c0c43bc3942e35d292"
 
 [[patches]]
+id = "megatron:npu-async-worker"
+category = "third_party"
+target = "megatron"
+file = "megatron/0002-ascend-async-checkpoint-worker.patch"
+summary = "Load NPU mapping inside spawned async checkpoint writer"
+issue = "SLIME-LATEST-NPU-ASYNC-CKPT"
+base_commit = "4b4acac9a1d28ea6829c8d4f566d75698a21249d"
+sha256 = "5f4c5ab6d16eafe3d0e27b829d185a3d1f896a6afd42fb0330602b4a4a0f6db8"
+
+[[patches]]
+id = "megatron-adaptor:async-preload-pickle"
+category = "third_party"
+target = "megatron-adaptor"
+file = "megatron-adaptor/0001-async-preload-pickle.patch"
+summary = "Make async checkpoint preload function pickleable"
+issue = "SLIME-LATEST-NPU-ASYNC-CKPT"
+base_commit = "eb0e5043438dd753099432bc3b3d8e5916ed1844"
+sha256 = "e2389ad8c779f5c6eb9fc4577b65ffc768e88e745bee5a396178ea2ff3e034ab"
+
+[[patches]]
 id = "sglang:slime-v0.5.21:sglang.patch"
 category = "third_party"
 target = "sglang"

@@ -81,12 +81,14 @@ pip install 'nvidia-modelopt[torch]==0.46.1' --no-build-isolation
 
 git clone https://github.com/NVIDIA/Megatron-LM.git --recursive && \
 cd Megatron-LM/ && git checkout 4b4acac9a1d28ea6829c8d4f566d75698a21249d && \
-git am "${REPO_ROOT}/patches/third_party/megatron/megatron-npu-v040-rebased.patch" && \
+git am "${REPO_ROOT}/patches/third_party/megatron/megatron-npu-v040-rebased.patch" \
+    "${REPO_ROOT}/patches/third_party/megatron/0002-ascend-async-checkpoint-worker.patch" && \
 pip install -e . && cd ..
 
 echo "5. install MA&TE"
 git clone https://gitcode.com/Ascend/MegatronAdaptor.git && \
-cd MegatronAdaptor/ && git checkout f707a3b6eb9981532c3419c08ea40a8bb5962af5 && \
+cd MegatronAdaptor/ && git checkout eb0e5043438dd753099432bc3b3d8e5916ed1844 && \
+git am "${REPO_ROOT}/patches/third_party/megatron-adaptor/0001-async-preload-pickle.patch" && \
 pip install -e . && cd ..
 git clone https://gitcode.com/Ascend/TransformerEngineNPU.git&& \
 cd TransformerEngineNPU/ && git checkout 2b8529f94c3fd10497bf772bdc5b448b7ed4659a && \

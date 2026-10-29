@@ -7,8 +7,11 @@ import slime.utils.external_utils.command_utils as U
 ENABLE_EVAL = bool(int(os.environ.get("SLIME_TEST_ENABLE_EVAL", "1")))
 TIGHT_HOST_MEMORY = bool(int(os.environ.get("SLIME_TEST_TIGHT_HOST_MEMORY", "1")))
 
-MODEL_NAME = "qwen3-4b-sft"
+MODEL_NAME = os.environ.get("SLIME_TEST_MODEL_NAME", "qwen3-4b-sft")
+WEIGHTS_ROOT = os.environ.get("SLIME_TEST_WEIGHTS_ROOT", "/home/slime-ascend_CI/slime-ascend/weights")
+MEGATRON_WEIGHTS_ROOT = os.environ.get("SLIME_TEST_MEGATRON_WEIGHTS_ROOT", WEIGHTS_ROOT)
 MODEL_TYPE = "qwen3-4B"
+SAVE_PATH = os.environ.get("SLIME_TEST_SAVE_PATH", f"/root/models/{MODEL_NAME}_slime")
 NUM_GPUS = 8
 
 
@@ -19,7 +22,7 @@ parser.add_argument("--async-save", action="store_true", help="Whether to test a
 def prepare():
     U.exec_command("mkdir -p /root/models /root/datasets")
     # 1. 软链接本地模型权重
-    local_weight_path = f"/home/slime-ascend_CI/slime-ascend/weights/{MODEL_NAME}"
+    local_weight_path = f"{WEIGHTS_ROOT}/{MODEL_NAME}"
     target_path = f"/root/models/{MODEL_NAME}"
     U.exec_command(f"ln -snf {local_weight_path} {target_path}")
     
@@ -37,16 +40,19 @@ def execute(mode: str = ""):
     os.environ["HCCL_NPU_SOCKET_PORT_RANGE"] = "61000-61050"
     os.environ["HYDRA_FULL_ERROR"] = "1"
     # ======================= NPU 环境变量 =======================
-    ckpt_args = f"--hf-checkpoint /home/slime-ascend_CI/slime-ascend/weights/qwen3-4b-sft " f"--ref-load /home/slime-ascend_CI/slime-ascend/weights/qwen3-4b-sft_torch_dist "
+    ckpt_args = (
+        f"--hf-checkpoint {WEIGHTS_ROOT}/{MODEL_NAME} "
+        f"--ref-load {MEGATRON_WEIGHTS_ROOT}/{MODEL_NAME}_torch_dist "
+    )
     if mode == "save":
-        ckpt_args += f"--save /root/models/{MODEL_NAME}_slime "
+        ckpt_args += f"--save {SAVE_PATH} "
         ckpt_args += "--save-interval 2 "
     elif mode == "async_save":
-        ckpt_args += f"--save /root/models/{MODEL_NAME}_slime "
+        ckpt_args += f"--save {SAVE_PATH} "
         ckpt_args += "--save-interval 2 "
         ckpt_args += "--async-save "
     elif mode == "load":
-        ckpt_args += f"--load /root/models/{MODEL_NAME}_slime "
+        ckpt_args += f"--load {SAVE_PATH} "
         ckpt_args += "--ckpt-step 1 "
 
     rollout_args = (
@@ -153,6 +159,6 @@ if __name__ == "__main__":
         os.environ.pop(proxy_var, None)
     execute("save" if not args.async_save else "async_save")
     print("🧹 Cleaning up Ray processes before starting load test...")
-    U.exec_command("ray stop -f && pkill -9 ray && pkill -9 sglang; sleep 5")
+    U.exec_command("ray stop --force")
     execute("load")
 
