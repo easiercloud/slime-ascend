@@ -220,3 +220,8 @@ Qwen3-4B critic-only Nightly (2026-10-29) passed with `--sglang-disable-cuda-gra
 - Reformatted `docs/get_started/quick_start.md`, `docker/Dockerfile.a3.ubuntu22.04.cann910.latest`, and `scripts/quick_install.sh` to follow those conventions. The version table now lists components separately; Docker build and run have the same subheadings as the mainline docs; the install steps and basic troubleshooting are displayed in the same order. The clone command selects this private synchronization branch so it installs the documented code.
 - The installer's long pip commands and chained Git/install commands were split into readable lines. Dockerfile commands, dependency versions, patch order, A3 ARM64/CANN 9.1.0 target, and Slime gitlink were kept. No image was built or NPU case rerun for this documentation and formatting change.
 - Validation: `git diff --check`, `bash -n scripts/quick_install.sh`, and `python scripts/check_patch_manifest.py` (22 entries) passed. All relative Quick Start links point to tracked files. The installed Docker buildx version has no `--check` flag; full A3 ARM64 build remains outstanding. Preserve the existing dirty `slime` submodule and untracked runtime outputs.
+
+## 2026-10-29 Dockerfile style correction
+
+- At the user's request, reverted the Dockerfile-only formatting and comment changes introduced by `b4c6522`. The file now matches its prior `2b41598` content exactly; the ARM64/CANN 9.1.0 dependency pins and build commands remain as before.
+- Kept the Quick Start and `scripts/quick_install.sh` organization changes. This correction did not build an image or rerun NPU tests.
