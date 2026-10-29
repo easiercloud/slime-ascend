@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euxo pipefail
 python -c 'import sys; assert sys.version_info[:2] == (3, 12), f"Python 3.12 is required, got {sys.version}"'
-grep -q '^version=9.0.0$' /usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/ascend_toolkit_install.info
+grep -q '^version=9.1.0$' /usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/ascend_toolkit_install.info
 test "$(uname -m)" = aarch64
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
@@ -9,14 +9,14 @@ python "${REPO_ROOT}/scripts/check_patch_manifest.py"
 pip install --upgrade pip packaging setuptools==80.10.2
 DEPS_ROOT=${SLIME_ASCEND_DEPS_ROOT:-"$(dirname "${REPO_ROOT}")"}
 
-# Pinned to the CANN 9.0.0 / Python 3.12 A3 aarch64 image.
+# Pinned to the CANN 9.1.0 / Python 3.12 A3 aarch64 image.
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
 cd "${DEPS_ROOT}"
 
 echo "0. install PyTorch and torch_npu"
-pip install torch==2.10.0 torchvision==0.25.0
-pip install torch_npu==2.10.0.post4
+pip install torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cpu
+pip install torch_npu==2.10.0.post6 --extra-index-url https://ascend.devcloud.huaweicloud.com/pypi/simple/
 
 echo "1. install SGLang from source"
 git clone --depth 1 --branch v0.5.21 https://github.com/sgl-project/sglang.git
@@ -37,17 +37,18 @@ pip install -e python[all_npu]
 cd ..
 
 echo "2. install torch & torch_npu & other basic packages"
-pip install pybind11==3.0.3 transformers==5.12.1 triton-ascend==3.2.1
-pip install memfabric-hybrid==1.0.8
+pip install pybind11==3.0.3 transformers==5.12.1 https://github.com/triton-lang/triton-ascend/releases/download/v3.2.2/triton_ascend-3.2.2-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl
+pip install https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/mf/v1.2.1/20260923.4/memfabric_hybrid-1.2.1-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl memfabric-zbal==1.1.3
 pip install sglang-router==0.3.2 --force-reinstall
 python -c "import sglang_router"
 
-echo "3. install CANN 9.0 / Python 3.12 A3 aarch64 prebuilt kernel wheels"
+echo "3. install CANN 9.1 / Python 3.12 A3 aarch64 prebuilt kernel wheels"
 cd /tmp
-wget --no-check-certificate https://gitcode.com/gcw_8jFUVqc5/sglang-kernel-npu-builds/releases/download/py312-cann9.0-a3/sgl-kernel-npu-torch2.10.0-py312-cann9.0-a3-aarch64.zip -O sgl-kernel-npu-a3.zip
+wget https://github.com/sgl-project/sgl-kernel-npu/releases/download/2026.9.0.post11/sgl-kernel-npu-2026.9.0.post11-torch2.10.0-py312-cann9.1.0-a3-aarch64.zip -O sgl-kernel-npu-a3.zip
+echo "1fec018f7842f505cdf13555a0bd948e4f5b6c8b0ef2c6a4dc800d1df8373e97  sgl-kernel-npu-a3.zip" | sha256sum -c -
 unzip sgl-kernel-npu-a3.zip
 pip install torch_memory_saver*.whl
-pip install sgl_kernel_npu*.whl
+pip install sgl_kernel_npu*.whl attentions*.whl
 pip install deep_ep*.whl
 cd "$(pip show deep-ep | awk '/^Location:/ {print $2}')"
 ln -s deep_ep/deep_ep_cpp*.so
@@ -96,9 +97,7 @@ pip install -e . && cd ..
 
 echo "6. install triton_ascend"
 pip uninstall triton triton_ascend -y
-pip install triton-ascend==3.2.1 \
-    --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ \
-    --trusted-host triton-ascend.osinfra.cn --no-cache-dir
+pip install https://github.com/triton-lang/triton-ascend/releases/download/v3.2.2/triton_ascend-3.2.2-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl --no-cache-dir
 
 echo "7. install slime-ascend"
 # Keep the submodule on the pinned upstream main commit and replay the registered

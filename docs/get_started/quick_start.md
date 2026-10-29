@@ -4,28 +4,29 @@
 
 ## 硬件支持说明
 
-本页的 Dockerfile 和安装脚本面向 **Atlas 800T A3、Linux ARM64（aarch64）**，使用 CANN 9.0.0 和 Python 3.12。训练侧使用 MegatronAdaptor 与 TransformerEngineNPU。
+本页的 Dockerfile 和安装脚本面向 **Atlas 800T A3、Linux ARM64（aarch64）**，使用 CANN 9.1.0 和 Python 3.12。训练侧使用 MegatronAdaptor 与 TransformerEngineNPU。
 
 ## 组件版本
 
 | 组件 | A3 ARM64 构建版本 |
 | ---- | ---------------- |
-| 基础镜像 | `swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.0.0-a3-ubuntu22.04-py3.12`（`linux/arm64`） |
-| Python / CANN | 3.12 / 9.0.0 |
-| torch / torch_npu / torchvision | 2.10.0 / 2.10.0.post4 / 0.25.0 |
+| 基础镜像 | `quay.io/ascend/cann:9.1.0-a3-ubuntu22.04-py3.12`（`linux/arm64`） |
+| Python / CANN | 3.12 / 9.1.0 |
+| torch / torch_npu / torchvision | 2.10.0 / 2.10.0.post6 / 0.25.0 |
 | Megatron-LM | `4b4acac9a1d28ea6829c8d4f566d75698a21249d` |
 | MegatronAdaptor | `eb0e5043438dd753099432bc3b3d8e5916ed1844` |
 | TransformerEngineNPU | `2b8529f94c3fd10497bf772bdc5b448b7ed4659a` |
 | Megatron-Bridge | `35b4ebfc486fb15dcc0273ceea804c3606be948a` |
 | mbridge | `89eb10887887bc74853f89a4de258c0702932a1c` |
 | SGLang | `v0.5.21`（`e00930c5489053f26d86b179cee0d087f846acbb`） |
-| sgl-kernel-npu / torch-memory-saver / DeepEP | 使用 `py312-cann9.0-a3` 预编译包；仅从 `9765e27532b8f854717eba1d3fb9a0bb97a0c887` 重建已打补丁的 torch-memory-saver |
-| sglang-router / memfabric-hybrid | `0.3.2` / `1.0.8` |
-| transformers / triton-ascend | `5.12.1` / `3.2.1` |
+| sgl-kernel-npu / torch-memory-saver / DeepEP | 社区 `2026.9.0.post11` 的 `py312-cann9.1.0-a3-aarch64` 预编译包（SHA256 校验）；仅从 `9765e27532b8f854717eba1d3fb9a0bb97a0c887` 重建已打补丁的 torch-memory-saver |
+| sglang-router / memfabric-hybrid | `0.3.2` / `1.2.1` |
+| memfabric-zbal | 1.1.3 (aarch64) |
+| transformers / triton-ascend | `5.12.1` / `3.2.2` |
 | nvidia-modelopt | `0.46.1` |
 | Slime submodule | `main@2026-10-22` (`18868a79b0b083a093798a94ed0f8cb4f71b9c14`) |
 
-CANN 9.0.0 / Python 3.12 / A3 ARM64 使用 [sgl-kernel-npu 预编译包](https://gitcode.com/gcw_8jFUVqc5/sglang-kernel-npu-builds/releases/download/py312-cann9.0-a3/sgl-kernel-npu-torch2.10.0-py312-cann9.0-a3-aarch64.zip)。仅对仓库中的 torch-memory-saver 补丁从固定源码重新打包。版本及补丁路径见 [Dockerfile](../../docker/Dockerfile.a3.ubuntu22.04.cann900.latest)、[quick_install.sh](../../scripts/quick_install.sh) 和 [MANIFEST.toml](../../patches/MANIFEST.toml)。本组合尚未完成整镜构建验证。
+CANN 9.1.0 / Python 3.12 / A3 ARM64 使用 [sgl-kernel-npu 预编译包](https://github.com/sgl-project/sgl-kernel-npu/releases/download/2026.9.0.post11/sgl-kernel-npu-2026.9.0.post11-torch2.10.0-py312-cann9.1.0-a3-aarch64.zip)。仅对仓库中的 torch-memory-saver 补丁从固定源码重新打包。版本及补丁路径见 [Dockerfile](../../docker/Dockerfile.a3.ubuntu22.04.cann910.latest)、[quick_install.sh](../../scripts/quick_install.sh) 和 [MANIFEST.toml](../../patches/MANIFEST.toml)。本组合尚未完成整镜构建验证。
 
 ## 使用指南
 
@@ -40,8 +41,8 @@ CANN 9.0.0 / Python 3.12 / A3 ARM64 使用 [sgl-kernel-npu 预编译包](https:/
 ```bash
 cd {slime-ascend-root-path}
 docker build --platform linux/arm64 \
-  -f docker/Dockerfile.a3.ubuntu22.04.cann900.latest \
-  -t slime-ascend:9.0.0-a3-ubuntu22.04-py3.12-main-20261022 .
+  -f docker/Dockerfile.a3.ubuntu22.04.cann910.latest \
+  -t slime-ascend:9.1.0-a3-ubuntu22.04-py3.12-main-20261022 .
 ```
 
 ```bash
@@ -53,14 +54,14 @@ docker run -it --rm \
   -v /usr/local/Ascend/add-ons:/usr/local/Ascend/add-ons \
   -v "$(pwd)":/workspace/slime-ascend \
   -w /workspace/slime-ascend \
-  slime-ascend:9.0.0-a3-ubuntu22.04-py3.12-main-20261022
+  slime-ascend:9.1.0-a3-ubuntu22.04-py3.12-main-20261022
 ```
 
 Dockerfile 按分步格式安装 SGLang、PyTorch、NPU 内核、mbridge、Megatron-Bridge、Megatron-LM、MegatronAdaptor、TransformerEngineNPU 和 triton-ascend；对存在的 third_party 补丁逐个执行 `git am`，最后运行 `build.sh` 回放 Slime 补丁并安装项目。构建上下文须包含仓库 Git 元数据与 Slime submodule。
 
 ### 方式二：本地安装脚本
 
-在 A3 ARM64、CANN 9.0.0 环境中安装 Python 3.12：
+在 A3 ARM64、CANN 9.1.0 环境中安装 Python 3.12：
 
 ```bash
 conda create -n slime-ascend python=3.12
@@ -70,7 +71,7 @@ cd slime-ascend
 bash scripts/quick_install.sh
 ```
 
-脚本与 Dockerfile 使用相同的源码提交和 third_party 补丁。脚本开始时检查 Python 3.12、CANN 9.0.0 与 aarch64。其他架构和设备需要独立的版本组合与验证。
+脚本与 Dockerfile 使用相同的源码提交和 third_party 补丁。脚本开始时检查 Python 3.12、CANN 9.1.0 与 aarch64。其他架构和设备需要独立的版本组合与验证。
 
 ### 补丁构建（build.sh）
 
