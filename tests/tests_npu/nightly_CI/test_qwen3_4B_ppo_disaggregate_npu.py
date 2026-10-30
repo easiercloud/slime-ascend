@@ -4,9 +4,7 @@ import tempfile
 import slime.utils.external_utils.command_utils as U
 HF_WEIGHTS_ROOT = "/home/slime-ascend_CI/slime-ascend/weights"
 DATASETS_ROOT = "/home/slime-ascend_CI/slime-ascend/datasets"
-MEGATRON_WEIGHTS_ROOT = os.environ.get(
-    "SLIME_TEST_MEGATRON_WEIGHTS_ROOT", "/home/slime-ascend_CI/slime-ascend/weights-MA"
-)
+MEGATRON_WEIGHTS_ROOT = "/home/slime-ascend_CI/slime-ascend/weights-MA"
 
 ENABLE_EVAL = bool(int(os.environ.get("SLIME_TEST_ENABLE_EVAL", "1")))
 

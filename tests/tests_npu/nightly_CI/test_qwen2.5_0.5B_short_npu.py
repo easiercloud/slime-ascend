@@ -10,9 +10,10 @@ NUM_GPUS = 4
 
 
 def execute():
-    hf_checkpoint = os.environ.get("SLIME_TEST_HF_CHECKPOINT", f"{HF_WEIGHTS_ROOT}/{MODEL_NAME}/")
-    ref_load = os.environ.get("SLIME_TEST_REF_LOAD", f"{MEGATRON_WEIGHTS_ROOT}/{MODEL_NAME}_torch_dist")
-    ckpt_args = f"--hf-checkpoint {hf_checkpoint} --ref-load {ref_load} "
+    ckpt_args = (
+        f"--hf-checkpoint {HF_WEIGHTS_ROOT}/{MODEL_NAME}/ "
+        f"--ref-load {MEGATRON_WEIGHTS_ROOT}/{MODEL_NAME}_torch_dist "
+    )
 
     rollout_args = (
         f"--prompt-data {DATASETS_ROOT}/dapo-math-17k/dapo-math-17k.jsonl "
@@ -108,10 +109,10 @@ def execute():
     )
 
 if __name__ == "__main__":
-    os.environ.pop("http_proxy", None)
-    os.environ.pop("https_proxy", None)
-    os.environ.pop("HTTP_PROXY", None)
-    os.environ.pop("HTTPS_PROXY", None)
+    os.environ.pop("http_proxy")
+    os.environ.pop("https_proxy")
+    os.environ.pop("HTTP_PROXY")
+    os.environ.pop("HTTPS_PROXY")
     execute()
 
 

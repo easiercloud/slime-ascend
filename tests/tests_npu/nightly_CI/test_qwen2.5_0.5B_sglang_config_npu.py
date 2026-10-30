@@ -4,9 +4,7 @@ import tempfile
 import slime.utils.external_utils.command_utils as U
 HF_WEIGHTS_ROOT = "/home/slime-ascend_CI/slime-ascend/weights"
 DATASETS_ROOT = "/home/slime-ascend_CI/slime-ascend/datasets"
-MEGATRON_WEIGHTS_ROOT = os.environ.get(
-    "SLIME_TEST_MEGATRON_WEIGHTS_ROOT", "/home/slime-ascend_CI/slime-ascend/weights-MA"
-)
+MEGATRON_WEIGHTS_ROOT = "/home/slime-ascend_CI/slime-ascend/weights-MA"
 
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
@@ -106,7 +104,6 @@ def execute():
         f"--sglang-config {config_path} "
     )
     sglang_args += "--sglang-device npu "
-    sglang_args += "--sglang-disable-cuda-graph "
 
     ci_args = "--ci-test "
 

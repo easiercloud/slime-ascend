@@ -31,10 +31,7 @@ MODEL_TYPE = "qwen3-4B"
 # This external-PD test currently relies on the existing Qwen3-4B conversion;
 # it is not part of the v0.3.1 Qwen3-30B conversion cache.
 HF_CHECKPOINT = "/home/slime-ascend_CI/slime-ascend/weights/Qwen3-4B"
-TORCH_DIST_CKPT = os.environ.get(
-    "SLIME_TEST_QWEN3_4B_TORCH_DIST_CKPT",
-    "/home/slime-ascend_CI/slime-ascend/weights-MA/Qwen3-4B_torch_dist",
-)
+TORCH_DIST_CKPT = "/home/slime-ascend_CI/slime-ascend/weights-MA/Qwen3-4B_torch_dist"
 PROMPT_DATA = "/home/slime-ascend_CI/slime-ascend/datasets/gsm8k/train.parquet"
 NUM_GPUS = 6
 NUM_TRAIN_GPUS = 4
@@ -173,7 +170,7 @@ def _launch_sglang_server(
                 if req.status == 200:
                     print(f"External sglang {disaggregation_mode} server is ready on GPUs {gpus}")
                     return process
-        except (urllib.error.URLError, TimeoutError):
+        except urllib.error.URLError:
             time.sleep(5)
             continue
         time.sleep(5)

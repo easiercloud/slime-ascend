@@ -1,7 +1,5 @@
 
 import os
-import re
-import subprocess
 
 import slime.utils.external_utils.command_utils as U
 
@@ -26,18 +24,9 @@ def prepare():
     target_dataset_path = "/root/datasets/dapo-math-17k"
     U.exec_command(f"ln -snf {local_dataset_path} {target_dataset_path}")
 
-    if not os.path.exists(f"/root/models/{MODEL_NAME}_torch_dist/latest_checkpointed_iteration.txt"):
-        check_npu_idle()
-        U.convert_checkpoint(
-            model_name=MODEL_NAME, megatron_model_type=MODEL_TYPE, num_gpus_per_node=NUM_GPUS, dir_dst="/root/models"
-        )
-
-
-def check_npu_idle():
-    output = subprocess.check_output(["npu-smi", "info"], text=True)
-    free = {int(n) for n in re.findall(r"No running processes found in NPU ([0-9]+)", output)}
-    if len(free) != 8:
-        raise RuntimeError(f"All 8 physical NPUs must be idle before this test; free: {sorted(free)}")
+    U.convert_checkpoint(
+        model_name=MODEL_NAME, megatron_model_type=MODEL_TYPE, num_gpus_per_node=NUM_GPUS, dir_dst="/root/models"
+    )
 
 
 def execute():
@@ -45,8 +34,8 @@ def execute():
     os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
     os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
     os.environ["ASCEND_RT_VISIBLE_DEVICES"] = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
-    os.environ["HCCL_HOST_SOCKET_PORT_RANGE"] = os.environ.get("HCCL_HOST_SOCKET_PORT_RANGE", "60000-60050")
-    os.environ["HCCL_NPU_SOCKET_PORT_RANGE"] = os.environ.get("HCCL_NPU_SOCKET_PORT_RANGE", "61000-61050")
+    os.environ["HCCL_HOST_SOCKET_PORT_RANGE"] = "60000-60050"
+    os.environ["HCCL_NPU_SOCKET_PORT_RANGE"] = "61000-61050"
     os.environ["HYDRA_FULL_ERROR"] = "1"
    
     # ======================= NPU 环境变量 =======================
@@ -115,11 +104,10 @@ def execute():
     )
 
     for i in range(2):
-        check_npu_idle()
         U.execute_train(
             train_args=train_args
             + (
-                f"--save-debug-rollout-data data-{i}-{{rollout_id}}.pt "
+                f"--save-debug-rollout-data data-{i}.pt "
                 f"--ci-save-grad-norm grad_norms-{i}.pt "
                 f"--actor-num-gpus-per-node 4 "
                 "--tensor-model-parallel-size 1 "
@@ -140,7 +128,7 @@ def execute():
         )
 
         print("🧹 清理外层循环遗留的 SGLang 和 NPU 显存缓存...")
-        U.exec_command("ray stop --force")
+        U.exec_command("pkill -9 sglang || true; sleep 5")
 
        # 8 GPU CPU 1
         for num_gpus in [4]:
@@ -162,7 +150,7 @@ def execute():
                         
                         # 4. 组装验证参数
                         args = clean_train_args + (
-                            f"--load-debug-rollout-data data-{i}-{{rollout_id}}.pt "
+                            f"--load-debug-rollout-data data-{i}.pt "
                             # f"--ci-load-grad-norm grad_norms-{i}.pt "
                             f"--context-parallel-size {cp_size} "
                             f"--tensor-model-parallel-size {tp_size} "
@@ -173,7 +161,6 @@ def execute():
                             "--max-tokens-per-gpu 8192 "
                         )
 
-                        check_npu_idle()
                         U.execute_train(
                             train_args=args,
                             num_gpus_per_node=num_gpus,
@@ -186,7 +173,6 @@ def execute():
                                 "GLOO_SOCKET_IFNAME": "lo",
                             },
                         )
-        U.exec_command("ray stop --force")
         train_args += "--calculate-per-token-loss "
 
 

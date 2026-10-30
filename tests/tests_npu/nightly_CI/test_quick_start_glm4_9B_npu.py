@@ -2,15 +2,13 @@ import os
 import slime.utils.external_utils.command_utils as U
 HF_WEIGHTS_ROOT = "/home/data/weights"
 DATASETS_ROOT = "/home/data/datasets"
-MEGATRON_WEIGHTS_ROOT = os.environ.get("SLIME_TEST_MEGATRON_WEIGHTS_ROOT", "/home/c00880099/weights-MA")
+MEGATRON_WEIGHTS_ROOT = "/home/c00880099/weights-MA"
 
 ENABLE_EVAL = U.get_bool_env_var("SLIME_TEST_ENABLE_EVAL", "1")
 
 MODEL_NAME = "GLM-Z1-9B-0414"
 MODEL_TYPE = "glm4-9B"
 NUM_GPUS = 8
-MAX_TOKENS_PER_GPU = int(os.environ.get("SLIME_TEST_MAX_TOKENS_PER_GPU", "4608"))
-OPTIMIZER_CPU_OFFLOAD = bool(int(os.environ.get("SLIME_TEST_OPTIMIZER_CPU_OFFLOAD", "0")))
 
 
 def execute():
@@ -36,15 +34,11 @@ def execute():
     )
 
     eval_args = (
-        (
-            f"--eval-interval 20 "
-            f"--eval-prompt-data aime24 {DATASETS_ROOT}/aime-2024/aime-2024.jsonl "
-            "--n-samples-per-eval-prompt 1 "
-            "--eval-max-response-len 16384 "
-            "--eval-top-k 1 "
-        )
-        if ENABLE_EVAL
-        else ""
+        f"{'--eval-interval 20 ' if ENABLE_EVAL else ''}"
+        f"--eval-prompt-data aime24 {DATASETS_ROOT}/aime-2024/aime-2024.jsonl "
+        "--n-samples-per-eval-prompt 1 "
+        "--eval-max-response-len 16384 "
+        "--eval-top-k 1 "
     )
 
     perf_args = (
@@ -58,7 +52,7 @@ def execute():
         "--recompute-method uniform "
         "--recompute-num-layers 1 "
         "--use-dynamic-batch-size "
-        f"--max-tokens-per-gpu {MAX_TOKENS_PER_GPU} "
+        "--max-tokens-per-gpu 4608 "
     )
 
     grpo_args = (
@@ -74,14 +68,7 @@ def execute():
     )
 
     optimizer_args = (
-        (
-            "--optimizer-cpu-offload "
-            "--overlap-cpu-optimizer-d2h-h2d "
-            "--use-precision-aware-optimizer "
-            if OPTIMIZER_CPU_OFFLOAD
-            else ""
-        )
-        + "--optimizer adam "
+        "--optimizer adam "
         "--lr 1e-6 "
         "--lr-decay-style constant "
         "--weight-decay 0.1 "
