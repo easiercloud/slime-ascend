@@ -1,4 +1,5 @@
 .upstream-sync/
+/HANDOFF.md
 
 __pycache__/
 *.pyc
