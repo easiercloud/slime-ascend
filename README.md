@@ -24,7 +24,8 @@ slime 的昇腾适配开发仓（patch 管理版）
 ## 硬件支持
 
 - **Atlas 800T A3**（当前维护的镜像目标）
-- 目标环境：CANN 9.0.0、Linux arm64、Python 3.12
+- **Atlas 800T A2**
+- 推荐环境：CANN 9.1.0、Linux arm64、Python 3.12（当前 Dockerfile 和 quick_install.sh 面向 A3）
 
 完整组件版本矩阵见 [快速使用指南 - 组件版本](docs/get_started/quick_start.md#组件版本)。
 
