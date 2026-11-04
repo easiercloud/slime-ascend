@@ -1,17 +1,17 @@
-From 44b8761f000390eb3c05252f5280ec529317c0f7 Mon Sep 17 00:00:00 2001
-From: gcw_8jFUVqc5 <caowuke@huawei.com>
-Date: Fri, 4 Sep 2026 08:12:39 +0000
-Subject: [PATCH] [Ascend] forward TMS graph arguments
+From 559a3c8fa7d9ba3437065ba8bf66250d16f008e1 Mon Sep 17 00:00:00 2001
+From: Slime Ascend Sync <sync@local.invalid>
+Date: Mon, 26 Oct 2026 17:10:03 +0800
+Subject: [PATCH] Forward positional NPU graph options through TMS adapter
 
 ---
  python/sglang/srt/utils/torch_memory_saver_adapter.py | 8 ++++----
  1 file changed, 4 insertions(+), 4 deletions(-)
 
 diff --git a/python/sglang/srt/utils/torch_memory_saver_adapter.py b/python/sglang/srt/utils/torch_memory_saver_adapter.py
-index ad98e59283..20a653dad4 100644
+index cd5c96e..d419a43 100644
 --- a/python/sglang/srt/utils/torch_memory_saver_adapter.py
 +++ b/python/sglang/srt/utils/torch_memory_saver_adapter.py
-@@ -41,7 +41,7 @@ class TorchMemorySaverAdapter(ABC):
+@@ -64,7 +64,7 @@ class TorchMemorySaverAdapter(ABC):
      def region(self, tag: str, enable_cpu_backup: bool = False):
          raise NotImplementedError
  
@@ -20,18 +20,25 @@ index ad98e59283..20a653dad4 100644
          raise NotImplementedError
  
      def disable(self):
-@@ -67,8 +67,8 @@ class _TorchMemorySaverAdapterReal(TorchMemorySaverAdapter):
+@@ -100,7 +100,7 @@ class _TorchMemorySaverAdapterReal(TorchMemorySaverAdapter):
      def region(self, tag: str, enable_cpu_backup: bool = False):
          return _memory_saver.region(tag=tag, enable_cpu_backup=enable_cpu_backup)
  
 -    def cuda_graph(self, **kwargs):
--        return _memory_saver.cuda_graph(**kwargs)
 +    def cuda_graph(self, *args, **kwargs):
+         if is_xpu():
+             # Upstream gates pauseable graph capture on hook_mode="preload" while XPU
+             # requires hook_mode="torch", so the two are mutually exclusive. Unreachable
+@@ -116,7 +116,7 @@ class _TorchMemorySaverAdapterReal(TorchMemorySaverAdapter):
+                     "release_memory_occupation(tags=['cuda_graph'])."
+                 )
+             return self._noop_context()
+-        return _memory_saver.cuda_graph(**kwargs)
 +        return _memory_saver.cuda_graph(*args, **kwargs)
  
-     def disable(self):
-         return _memory_saver.disable()
-@@ -94,7 +94,7 @@ class _TorchMemorySaverAdapterNoop(TorchMemorySaverAdapter):
+     @contextmanager
+     def _noop_context(self, **kwargs):
+@@ -146,7 +146,7 @@ class _TorchMemorySaverAdapterNoop(TorchMemorySaverAdapter):
          yield
  
      @contextmanager
@@ -40,6 +47,3 @@ index ad98e59283..20a653dad4 100644
          yield
  
      @contextmanager
--- 
-2.34.1
-

@@ -23,10 +23,9 @@ slime 的昇腾适配开发仓（patch 管理版）
 
 ## 硬件支持
 
-- **Atlas 800T A3**
+- **Atlas 800T A3**（当前维护的镜像目标）
 - **Atlas 800T A2**
-- 推荐配置：CANN 9.0.0 或更高版本；Ascend HDK 25.5.0 或更高版本
-- 推荐环境：Linux arm64，Python 3.11
+- 推荐环境：CANN 9.1.0、Linux arm64、Python 3.12（当前 Dockerfile 和 quick_install.sh 面向 A3）
 
 完整组件版本矩阵见 [快速使用指南 - 组件版本](docs/get_started/quick_start.md#组件版本)。
 
@@ -35,13 +34,12 @@ slime 的昇腾适配开发仓（patch 管理版）
 ```
 slime-ascend/
 ├── build.sh              # 构建脚本：重置 submodule + 按序应用全部补丁 + 验证
-├── docker/               # NPU Dockerfile（A3；A2 换基础镜像与 whl 即可）
+├── docker/               # A3 NPU Dockerfile
 ├── docs/                 # 项目文档（快速开始、模型支持、开发指南、安全声明）
 ├── slime/                # THUDM/slime submodule，构建产物（补丁直接应用于此工作区）
 ├── patches/              # 全部改动，按性质分类（详见 patches/README.md）
 │   ├── npu-compat/         # NPU 硬件差异适配（永久维护）：设备标识、环境变量、资源分配
 │   ├── upstream-fixes/     # 上游 bug 的临时 workaround（上游修复后删除）
-│   ├── features/           # NPU 侧新增能力
 │   ├── third_party/        # 对依赖组件的补丁（sglang / Megatron-LM / Megatron-Bridge / mbridge / TE-NPU）
 │   └── MANIFEST.toml       # 补丁清单：逐 patch 说明与上游跟踪信息
 └── scripts/              # 安装脚本与运行示例

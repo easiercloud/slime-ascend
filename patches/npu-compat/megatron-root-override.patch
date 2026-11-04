@@ -1,0 +1,53 @@
+From db80f1c2fd93a19366d0f2e6a08a7b6fd07c505c Mon Sep 17 00:00:00 2001
+From: Slime Ascend Sync <sync@local.invalid>
+Date: Tue, 20 Oct 2026 11:24:12 +0800
+Subject: [PATCH] Allow configurable Megatron root and recover stale Ray GCS
+
+---
+ slime/utils/external_utils/command_utils.py | 19 +++++++++++--------
+ 1 file changed, 11 insertions(+), 8 deletions(-)
+
+diff --git a/slime/utils/external_utils/command_utils.py b/slime/utils/external_utils/command_utils.py
+index 4f037d3e..f8279109 100644
+--- a/slime/utils/external_utils/command_utils.py
++++ b/slime/utils/external_utils/command_utils.py
+@@ -54,7 +54,7 @@ def convert_checkpoint(
+ 
+     exec_command(
+         f"source {repo_base_dir}/scripts/models/{megatron_model_type}.sh && "
+-        f"PYTHONPATH=/workspace/Megatron-LM:/workspace/Megatron-Bridge/src:/workspace/MegatronAdaptor:/workspace/TransformerEngineNPU:$PYTHONPATH "
++        f"PYTHONPATH={os.environ.get('SLIME_MEGATRON_ROOT', '/workspace/Megatron-LM')}:/workspace/Megatron-Bridge/src:/workspace/MegatronAdaptor:/workspace/TransformerEngineNPU:$PYTHONPATH "
+         f"torchrun "
+         f"--nproc-per-node {num_gpus_per_node} "
+         f"{multinode_args}"
+@@ -122,12 +122,15 @@ def execute_train(
+         )
+         # A manual trainer restart must leave the Ray head and its detached
+         # rollout session alive. Query it before starting a new head.
+-        ray_running = (
+-            subprocess.run(
+-                ["ray", "status"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30
+-            ).returncode
+-            == 0
+-        )
++        try:
++            ray_running = (
++                subprocess.run(
++                    ["ray", "status"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30
++                ).returncode
++                == 0
++            )
++        except subprocess.TimeoutExpired:
++            ray_running = False
+         if not ray_running:
+             exec_command(
+                 f"export PYTHONUNBUFFERED=1 && "
+@@ -143,7 +146,7 @@ def execute_train(
+     runtime_env_json = json.dumps(
+         {
+             "env_vars": {
+-                "PYTHONPATH": f"/workspace/Megatron-LM:/workspace/Megatron-Bridge/src:/workspace/MegatronAdaptor:/workspace/TransformerEngineNPU:{os.environ.get('PYTHONPATH', '')}",
++                "PYTHONPATH": f"{os.environ.get('SLIME_MEGATRON_ROOT', '/workspace/Megatron-LM')}:/workspace/Megatron-Bridge/src:/workspace/MegatronAdaptor:/workspace/TransformerEngineNPU:{os.environ.get('PYTHONPATH', '')}",
+                 "SLIME_ENABLE_PROFILING": "False",
+                 "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+                 "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",

@@ -3,7 +3,7 @@
 #
 # 功能：
 #   1. 重置 slime submodule 到指定 commit
-#   2. 按顺序应用补丁 (npu-compat → upstream-fixes → features)
+#   2. 按顺序应用补丁 (npu-compat → upstream-fixes)
 #   3. 生成可用的 slime-ascend
 
 set -euo pipefail
@@ -11,6 +11,7 @@ set -euo pipefail
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SLIME_DIR="${REPO_ROOT}/slime"
 PATCHES_DIR="${REPO_ROOT}/patches"
+python3 "${REPO_ROOT}/scripts/check_patch_manifest.py"
 UPSTREAM_COMMIT=$(python3 - "${PATCHES_DIR}/MANIFEST.toml" <<'PY'
 import sys
 import tomllib
@@ -184,7 +185,7 @@ PY
                 cd "${SLIME_DIR}"
                 if git am "$patch" > /dev/null 2>&1; then
                     echo "  ✓ ${patch_name}"
-                    ((patch_count++))
+                    ((patch_count+=1))
                 else
                     git am --abort > /dev/null 2>&1 || true
                     log_error "  失败: ${patch_name}"
@@ -193,7 +194,7 @@ PY
                 cd "${REPO_ROOT}"
             else
                 echo "  [DRY-RUN] 应用 ${patch_name}"
-                ((patch_count++))
+                ((patch_count+=1))
             fi
         fi
     done
@@ -225,8 +226,6 @@ echo ""
 apply_patch_category "npu-compat" || exit 1
 echo ""
 apply_patch_category "upstream-fixes" || exit 1
-echo ""
-apply_patch_category "features" || exit 1
 echo ""
 
 # 步骤 4: 验证构建

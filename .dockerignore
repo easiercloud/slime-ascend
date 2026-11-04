@@ -1,0 +1,12 @@
+**/__pycache__/
+**/*.pyc
+.npu-test-autofix*/
+.upstream-sync*/
+logs/
+torch_compile_debug/
+kernel_meta/
+docker_packages/
+docker_sources/
+*.pt
+*.tar.gz
+*.zip

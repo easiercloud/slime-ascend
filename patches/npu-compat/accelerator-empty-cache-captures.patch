@@ -1,0 +1,36 @@
+From 397d61904742a4fbb9ae538bf1aabf88d6592248 Mon Sep 17 00:00:00 2001
+From: slime-ascend <slime-ascend@local>
+Date: Thu, 17 Sep 2026 00:00:00 +0000
+Subject: [PATCH] tolerate allocator cache release during graph teardown
+
+Ascend tracks graph captures across streams. The current-stream query can
+report no capture while another stream is still winding down, causing
+torch.npu.empty_cache() to raise captures_underway.empty(). Cache release is
+optional at this point, so ignore only that allocator transition error and
+preserve all unrelated RuntimeErrors.
+---
+ slime/utils/accelerator/npu.py | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/slime/utils/accelerator/npu.py b/slime/utils/accelerator/npu.py
+index 7483db3b..4454854f 100644
+--- a/slime/utils/accelerator/npu.py
++++ b/slime/utils/accelerator/npu.py
+@@ -66,7 +66,16 @@ class NPUAccelerator(TorchAccelerator):
+         is_capturing = getattr(module, "is_current_stream_capturing", None)
+         if is_capturing is not None and is_capturing():
+             return
+-        module.empty_cache()
++        try:
++            module.empty_cache()
++        except RuntimeError as exc:
++            # Ascend's allocator tracks graph captures across streams.  The
++            # current-stream query above can therefore be false while a
++            # capture is still winding down elsewhere in the process.
++            # Releasing the cache is optional here; retrying it would only
++            # turn a successful weight transfer into a hard failure.
++            if "captures_underway.empty()" not in str(exc):
++                raise
+ 
+     def supports(self, capability: str) -> bool:
+         if capability in {"cuda_int4_extension", "nvml_affinity", "sglang_fp8_utils", "triton_kernels"}:

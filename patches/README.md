@@ -8,7 +8,7 @@
 patches/
 ├── npu-compat/       # NPU 硬件差异性适配（永久性）
 ├── upstream-fixes/   # 上游 bug 的临时 workaround（预期上游修复后删除）
-├── features/         # NPU 侧新增能力
+├── third_party/      # 外部依赖的固定版本补丁
 └── MANIFEST.toml     # 补丁清单和元数据
 ```
 
@@ -41,17 +41,6 @@ patches/
 - 已修复的补丁从此目录删除
 - 在 `MANIFEST.toml` 中跟踪上游 issue
 
-### features/ - NPU 新增能力
-
-**特点**：
-- 长期维护
-- NPU 特有的功能增强
-- 可能未来贡献回上游
-
-**示例**：
-- FSDP backend for NPU
-- NPU 特定的优化特性
-
 ## 应用补丁
 
 补丁由 `build.sh` 自动应用：
@@ -61,9 +50,11 @@ patches/
 ./build.sh
 ```
 
+构建脚本先校验 MANIFEST 中所有补丁文件及 SHA256；缺失或不匹配时在重置 submodule 前失败。
+
 构建脚本会：
 1. Checkout `slime` submodule 到指定 commit
-2. 按 `MANIFEST.toml` 顺序使用 `git am` 应用 `npu-compat`、`upstream-fixes`、`features` 补丁
+2. 按 `MANIFEST.toml` 顺序使用 `git am` 应用 `npu-compat`、`upstream-fixes` 补丁
 3. 生成可用的 slime-ascend
 
 ## 维护补丁
@@ -104,7 +95,7 @@ git format-patch -1 HEAD --stdout > ../patches/npu-compat/existing.patch
 # CI 会自动执行，也可手动测试
 cd slime
 git fetch origin
-git checkout v0.4.0  # 新版本
+git checkout <upstream-commit>  # 目标版本
 
 # 尝试应用补丁
 cd ..
