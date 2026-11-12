@@ -4,7 +4,7 @@
 
 ## 硬件支持说明
 
-**slime-ascend** 本版本的 Dockerfile 和安装脚本面向华为昇腾 **Atlas 800T A3**，使用 Linux ARM64、CANN 9.1.0 和 Python 3.12。训练侧使用 MegatronAdaptor 和 TransformerEngineNPU。
+**slime-ascend** 本版本的 Dockerfile 和安装脚本面向华为昇腾 **Atlas A3训练系列产品**，使用 Linux ARM64、CANN 9.1.0 和 Python 3.12。训练侧使用 MegatronAdaptor 和 TransformerEngineNPU。
 
 ## 组件版本
 
