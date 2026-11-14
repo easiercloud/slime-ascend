@@ -4,14 +4,17 @@ set -euo pipefail
 # Standalone NPU CI entrypoint. Slime source patches are replayed from the
 # official v0.3.2 submodule; dependency patches are installed by the matching
 # quick_install/Docker build and are not applied a second time here.
-WORKSPACE=${WORKSPACE:-/home/slime-ascend_CI/slime-ascend}
+WORKSPACE=${WORKSPACE:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}
 DEPS_ROOT=${SLIME_ASCEND_DEPS_ROOT:-/workspace}
 
 cd "${WORKSPACE}"
 bash build.sh
 
+set +u
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
+set -u
+
 export PYTHONPATH="${WORKSPACE}/slime:${DEPS_ROOT}/mbridge:${DEPS_ROOT}/Megatron-LM:${DEPS_ROOT}/sglang/python:${DEPS_ROOT}/Megatron-Bridge/src:${DEPS_ROOT}/MegatronAdaptor:${DEPS_ROOT}/TransformerEngineNPU:${PYTHONPATH:-}"
 export ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
 export HCCL_CONNECT_TIMEOUT=${HCCL_CONNECT_TIMEOUT:-3600}
