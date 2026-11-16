@@ -30,7 +30,8 @@ env:
   pr_id: ${{ atomgit.event.pull_request.number || atomgit.event.issue.number }}
   ST_IMAGE_V0_2_2: swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-slime-ascend:v0.2.2-latest
   ST_IMAGE_V0_2_4: swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-slime-ascend:v0.2.4-latest
-  ST_IMAGE_DEFAULT: swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-slime-ascend:main-latest
+  ST_IMAGE_MAIN: swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-slime-ascend:main-latest
+  ST_IMAGE_DEFAULT: swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-slime-ascend:v0.3.0-latest
 
 stages:
   stage1:
@@ -211,6 +212,7 @@ stages:
               case "$TARGET_BRANCH" in
                 v0.2.2) st_image="$ST_IMAGE_V0_2_2" ;;
                 v0.2.4) st_image="$ST_IMAGE_V0_2_4" ;;
+                main) st_image="$ST_IMAGE_MAIN" ;;
                 *) st_image="$ST_IMAGE_DEFAULT" ;;
               esac
               test -n "$st_image"
