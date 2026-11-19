@@ -1,4 +1,18 @@
 #!/bin/bash
+# Copyright 2026 Huawei Technologies Co., Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 # for rerun the task
 pkill -9 sglang
@@ -29,7 +43,8 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
 export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
 
-export LOG_FILE=./logs/train_log_$(date +%Y-%m-%d_%H-%M-%S)_glm47_128k.log
+LOG_FILE=./logs/train_log_$(date +%Y-%m-%d_%H-%M-%S)_glm47_128k.log
+export LOG_FILE
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 source "${SCRIPT_DIR}/models/glm4.7-30B-A3B.sh"
@@ -120,7 +135,7 @@ SGLANG_ARGS=(
    --sglang-moe-dense-tp-size 1
    --sglang-cuda-graph-max-bs 16
    --sglang-max-running-requests 64
-   
+
    # ======================= NPU 添加参数 =======================
    --sglang-disable-radix-cache
    --sglang-chunked-prefill-size 8192
@@ -171,17 +186,17 @@ if [ "$MASTER_ADDR" = "$CURRENT_IP" ]; then
             --actor-num-gpus-per-node 16 \
             --rollout-num-gpus 16 \
             --num-gpus-per-node 16 \
-            --save-debug-rollout-data /path/to/exp2_rollout_{rollout_id}.pt \
-            ${MODEL_ARGS[@]} \
-            ${ROLLOUT_ARGS[@]} \
-            ${OPTIMIZER_ARGS[@]} \
-            ${GRPO_ARGS[@]} \
-            ${WANDB_ARGS[@]} \
-            ${PERF_ARGS[@]} \
-            ${SGLANG_ARGS[@]} \
-            ${MISC_ARGS[@]} \
-            ${CKPT_ARGS[@]} \
-            ${EVAL_ARGS[@]} \
+            --save-debug-rollout-data "/path/to/exp2_rollout_{rollout_id}.pt" \
+            "${MODEL_ARGS[@]}" \
+            "${ROLLOUT_ARGS[@]}" \
+            "${OPTIMIZER_ARGS[@]}" \
+            "${GRPO_ARGS[@]}" \
+            "${WANDB_ARGS[@]}" \
+            "${PERF_ARGS[@]}" \
+            "${SGLANG_ARGS[@]}" \
+            "${MISC_ARGS[@]}" \
+            "${CKPT_ARGS[@]}" \
+            "${EVAL_ARGS[@]}" \
             2>&1 | tee "${LOG_FILE}"
           break
       else

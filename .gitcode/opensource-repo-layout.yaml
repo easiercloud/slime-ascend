@@ -1,0 +1,4 @@
+project: Ascend/slime-ascend
+directories:
+  - path: "./scripts/"
+    type: source
