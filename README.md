@@ -36,6 +36,7 @@ slime-ascend/
 ├── build.sh              # 构建脚本：重置 submodule + 按序应用全部补丁 + 验证
 ├── docker/               # A3 NPU Dockerfile
 ├── docs/                 # 项目文档（快速开始、模型支持、开发指南、安全声明）
+├── examples/             # 已支持特性的使用示例
 ├── slime/                # THUDM/slime submodule，构建产物（补丁直接应用于此工作区）
 ├── patches/              # 全部改动，按性质分类（详见 patches/README.md）
 │   ├── npu-compat/         # NPU 硬件差异适配（永久维护）：设备标识、环境变量、资源分配
