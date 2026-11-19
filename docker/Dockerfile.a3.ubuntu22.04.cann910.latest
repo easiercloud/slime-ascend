@@ -19,9 +19,11 @@ RUN apt-get update -y && \
     test "$(uname -m)" = aarch64 && \
     git config --global user.email 'temp@example.com' && git config --global user.name 'temp'
 
-# Build from the repository root. Retain the git metadata for submodule replay.
-COPY . /workspace/slime-ascend
-RUN python /workspace/slime-ascend/scripts/check_patch_manifest.py
+# Fetch the source and patches inside the image, including git metadata for submodules.
+ARG SLIME_ASCEND_COMMIT=134b69de35e507c68fed7a70e7aac54ad2bd8eae
+RUN git clone --branch main https://gitcode.com/Ascend/slime-ascend.git /workspace/slime-ascend && \
+    cd /workspace/slime-ascend && git checkout "$SLIME_ASCEND_COMMIT" && \
+    python scripts/check_patch_manifest.py
 
 RUN pip install torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cpu && \
     pip install torch_npu==2.10.0.post6 --extra-index-url https://ascend.devcloud.huaweicloud.com/pypi/simple/
@@ -41,7 +43,10 @@ RUN git clone --depth 1 --branch v0.5.21 https://github.com/sgl-project/sglang.g
     pip install -e 'python[all_npu]'
 
 # 2. PyTorch, torch_npu, router and rollout dependencies.
-RUN pip install pybind11==3.0.3 transformers==5.12.1 https://github.com/triton-lang/triton-ascend/releases/download/v3.2.1/triton_ascend-3.2.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com/mf/v1.2.1/20260923.4/memfabric_hybrid-1.2.1-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl memfabric-zbal==1.1.3 && \
+RUN pip install pybind11==3.0.3 transformers==5.12.1 \
+    https://github.com/triton-lang/triton-ascend/releases/download/v3.2.1/triton_ascend-3.2.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl \
+    memfabric-hybrid==1.2.1 \
+    memfabric-zbal==1.1.3 && \
     pip install sglang-router==0.3.2 --force-reinstall && \
     python -c 'import sglang_router' && \
     cd /tmp && \
@@ -84,8 +89,8 @@ RUN git clone https://gitcode.com/Ascend/MegatronAdaptor.git /workspace/Megatron
     cd /workspace/MegatronAdaptor && git checkout eb0e5043438dd753099432bc3b3d8e5916ed1844 && \
     git am /workspace/slime-ascend/patches/third_party/megatron-adaptor/0001-async-preload-pickle.patch && pip install -e . && \
     git clone https://gitcode.com/Ascend/TransformerEngineNPU.git /workspace/TransformerEngineNPU && \
-    cd /workspace/TransformerEngineNPU && git checkout 2b8529f94c3fd10497bf772bdc5b448b7ed4659a && \
-    pip install -e .
+    cd /workspace/TransformerEngineNPU && git checkout cb43bfcd033686c9ad90765db337bf4866c7460d && \
+    pip install -e . --no-build-isolation
 
 # 6. Triton and the pinned Slime main patch series.
 RUN pip uninstall -y triton triton-ascend opencv-python && \
@@ -93,8 +98,9 @@ RUN pip uninstall -y triton triton-ascend opencv-python && \
     echo 'source /usr/local/Ascend/ascend-toolkit/set_env.sh' >> /root/.bashrc && \
     echo 'source /usr/local/Ascend/nnal/atb/set_env.sh' >> /root/.bashrc && \
     cd /workspace/slime-ascend && git submodule update --init --recursive && \
-    bash build.sh && pip install -e slime && mkdir -p logs && \
-    python -c 'import slime, torch, torch_npu; print(torch.__version__)'
+    bash build.sh && sed -i '/^sunabako>=0.1.2$/d' slime/requirements.txt && \
+    pip install -e slime pyarrow==25.0.1 && mkdir -p logs && \
+    python -c 'import numpy, pyarrow; from importlib.metadata import version; print("numpy", numpy.__version__, "pyarrow", pyarrow.__version__, "slime", version("slime"), "torch", version("torch"), "torch-npu", version("torch-npu"))'
 
 RUN pip list && unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 CMD ["/bin/bash"]

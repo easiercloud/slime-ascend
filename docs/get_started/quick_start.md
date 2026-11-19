@@ -117,3 +117,26 @@ bash build.sh
 ## 常见问题排查
 
 补丁冲突时，核对 [MANIFEST.toml](../../patches/MANIFEST.toml) 的基线与实际文件，并检查 `git am --show-current-patch=diff`。
+
+### SGLang 推理请求参数不生效
+
+如果通过 SGLang Router 发送推理请求时 payload 参数不生效，可从指定源码提交构建 Router。当前 Dockerfile 固定安装 `sglang-router==0.3.2`；以下步骤会替换该版本，须在目标环境中验证其与当前 SGLang 的兼容性。
+
+```bash
+# 安装 Rust 和 Cargo，并加载环境变量
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+rustc --version
+cargo --version
+
+# 获取 Router 源码
+git clone https://github.com/zhuzilin/sgl-router.git
+cd sgl-router
+git checkout 5f8d397
+
+cargo build --release
+pip install maturin
+cd bindings/python
+maturin build --release --out dist --features vendored-openssl
+pip install --force-reinstall dist/*.whl
+```
