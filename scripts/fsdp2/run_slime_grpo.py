@@ -9,6 +9,32 @@ import sys
 import tempfile
 
 
+def audit_export_storage(model_path):
+    """Check the actual safetensors headers, before any loader dtype casting."""
+    root = Path(model_path)
+    manifest = json.loads((root / "manifest.json").read_text())
+    tensors = {}
+    for name in manifest["files"]:
+        if not name.endswith(".safetensors"):
+            continue
+        with (root / name).open("rb") as stream:
+            length = int.from_bytes(stream.read(8), "little")
+            if not 0 < length < 8 * 1024**2:
+                raise RuntimeError("Unexpected safetensors header length")
+            header = json.loads(stream.read(length))
+        for key, metadata in header.items():
+            if key == "__metadata__":
+                continue
+            if key in tensors or metadata["dtype"] != "F32":
+                raise RuntimeError("Duplicate tensor or non-FP32 checkpoint storage")
+            if metadata["shape"] != manifest["state"][key]["shape"]:
+                raise RuntimeError("Safetensors storage shape disagrees with the manifest")
+            tensors[key] = {"dtype": metadata["dtype"], "shape": metadata["shape"]}
+    if set(tensors) != set(manifest["state"]):
+        raise RuntimeError("Safetensors storage is not a complete model")
+    return {"weight_version": manifest["weight_version"], "tensors": tensors}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", type=Path, required=True)
@@ -68,11 +94,13 @@ def main():
     if any(receipt["weight_version"] != version or not receipt["verified"]
            for version, receipt in enumerate(receipts)):
         raise RuntimeError("HF weight receiver did not accept every version")
+    storage_audits = [audit_export_storage(receipt["model_path"]) for receipt in receipts]
+    (run / "export-storage-audit.json").write_text(json.dumps(storage_audits, indent=2) + "\n")
     summary = {"scope": "Slime fixed-rollout FSDP2 GRPO and offline HF cold-load receiver",
                "online_generation": False, "completed_ranks": 8, "rollouts": options.rollouts,
                "optimizer_steps_per_rank": options.rollouts, "steps": ranks[0]["steps"],
                "received_weight_versions": [receipt["weight_version"] for receipt in receipts],
-               "receiver_receipts": receipts, "ray_temp_dir": ray_dir}
+               "receiver_receipts": receipts, "storage_audited": True, "ray_temp_dir": ray_dir}
     (run / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(f"Slime GRPO report: {run / 'summary.json'}", flush=True)
 

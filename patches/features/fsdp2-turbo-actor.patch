@@ -1,4 +1,4 @@
-From d29788f149ce407cfc3a11bbadd6d6e1e301fd74 Mon Sep 17 00:00:00 2001
+From 8db5089a25bafc9c370847454de8d7265eb2d401 Mon Sep 17 00:00:00 2001
 From: yiweiyun <1223702268@qq.com>
 Date: Sat, 21 Nov 2026 13:27:40 +0800
 Subject: [PATCH] Add dense FSDPTurbo Ray actor, GRPO objective and verified HF
@@ -7,12 +7,12 @@ Subject: [PATCH] Add dense FSDPTurbo Ray actor, GRPO objective and verified HF
 Signed-off-by: yiweiyun <1223702268@qq.com>
 ---
  slime/backends/fsdp2_utils/__init__.py |   1 +
- slime/backends/fsdp2_utils/actor.py    | 269 +++++++++++++++++++++++++
- slime/backends/fsdp2_utils/export.py   | 104 ++++++++++
+ slime/backends/fsdp2_utils/actor.py    | 270 +++++++++++++++++++++++++
+ slime/backends/fsdp2_utils/export.py   | 122 +++++++++++
  slime/backends/fsdp2_utils/loss.py     |  77 +++++++
- tests/fsdp2/test_fsdp2_export.py       |  39 ++++
+ tests/fsdp2/test_fsdp2_export.py       |  98 +++++++++
  tests/fsdp2/test_fsdp2_loss.py         |  96 +++++++++
- 6 files changed, 586 insertions(+)
+ 6 files changed, 664 insertions(+)
  create mode 100644 slime/backends/fsdp2_utils/__init__.py
  create mode 100644 slime/backends/fsdp2_utils/actor.py
  create mode 100644 slime/backends/fsdp2_utils/export.py
@@ -29,10 +29,10 @@ index 00000000..735240f2
 +"""Minimal dense-model FSDPTurbo backend; no Megatron imports."""
 diff --git a/slime/backends/fsdp2_utils/actor.py b/slime/backends/fsdp2_utils/actor.py
 new file mode 100644
-index 00000000..de37c78a
+index 00000000..12fbee19
 --- /dev/null
 +++ b/slime/backends/fsdp2_utils/actor.py
-@@ -0,0 +1,269 @@
+@@ -0,0 +1,270 @@
 +"""Minimal Slime Ray actor for dense random-initialized Qwen3 FSDP8 GRPO."""
 +
 +import importlib.metadata
@@ -282,7 +282,8 @@ index 00000000..de37c78a
 +                           "turbo_sha": revision.stdout.strip() if revision.returncode == 0 else None,
 +                           "parameter_dtype": "torch.float32", "forward_dtype": "torch.bfloat16",
 +                           "reduce_dtype": "torch.float32"}
-+                probe = {"input_ids": probe_tokens.cpu().tolist(), "logits": logits, "atol": 0.02, "rtol": 0.02}
++                probe = {"input_ids": probe_tokens.cpu().tolist(), "logits": logits,
++                         "forward_dtype": "torch.bfloat16", "atol": 0.02, "rtol": 0.02}
 +                status[0] = {"result": write_export(self.hf_model, full_state, self.args.update_weight_disk_dir,
 +                                                   version, probe, runtime)}
 +            except Exception as error:
@@ -304,10 +305,10 @@ index 00000000..de37c78a
 +        raise NotImplementedError("Training offload is not supported by the minimal FSDP2 backend")
 diff --git a/slime/backends/fsdp2_utils/export.py b/slime/backends/fsdp2_utils/export.py
 new file mode 100644
-index 00000000..fccdb80d
+index 00000000..15044777
 --- /dev/null
 +++ b/slime/backends/fsdp2_utils/export.py
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,122 @@
 +"""Versioned, atomic full-CPU HF exports and an independent cold-load receiver."""
 +
 +import hashlib
@@ -351,7 +352,7 @@ index 00000000..fccdb80d
 +        model.save_pretrained(staging, state_dict=dict(state_dict), safe_serialization=True, max_shard_size="2GB")
 +        files = {p.name: {"sha256": _file_sha256(p), "bytes": p.stat().st_size}
 +                 for p in staging.iterdir() if p.is_file()}
-+        manifest = {"schema_version": 1, "weight_version": weight_version, "format": "hf-full-cpu",
++        manifest = {"schema_version": 2, "weight_version": weight_version, "format": "hf-full-cpu",
 +                    "runtime": runtime, "probe": probe, "files": files,
 +                    "state": inventory}
 +        (staging / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -373,7 +374,7 @@ index 00000000..fccdb80d
 +    if Path(manifest_path).resolve() != root / "manifest.json":
 +        raise ValueError("Manifest must belong to the published model directory")
 +    manifest = json.loads((root / "manifest.json").read_text())
-+    if (manifest["schema_version"] != 1 or manifest["weight_version"] != int(weight_version)
++    if (manifest["schema_version"] != 2 or manifest["weight_version"] != int(weight_version)
 +            or (root / "COMPLETE").read_text().strip() != str(weight_version)):
 +        raise ValueError("Incomplete export or weight-version mismatch")
 +    for name, expected in manifest["files"].items():
@@ -396,7 +397,24 @@ index 00000000..fccdb80d
 +            raise ValueError(f"Cold-loaded tensor metadata differs: {name}")
 +        if not torch.isfinite(tensor).all():
 +            raise ValueError(f"Cold-loaded tensor is nonfinite: {name}")
++    tensor_count = len(state)
++    # Release the inventory mapping AND the final loop tensor before converting
++    # the model; either can otherwise retain the old full FP32 storage.
++    del state, tensor
 +    probe = manifest["probe"]
++    forward_dtypes = {"torch.float32": torch.float32, "torch.bfloat16": torch.bfloat16}
++    if probe.get("forward_dtype") not in forward_dtypes:
++        raise ValueError(f"Unsupported probe forward dtype: {probe.get('forward_dtype')!r}")
++    forward_dtype = forward_dtypes[probe["forward_dtype"]]
++    # FSDP mixed precision casts parameters and inputs, not floating buffers.
++    # model.to(dtype) would also round Qwen's nonpersistent FP32 RoPE buffers.
++    # Preserve those values/dtypes so the receiver matches the training policy.
++    buffers = {name: value.detach().clone() for name, value in model.named_buffers()
++               if value.is_floating_point()}
++    model.to(dtype=forward_dtype)
++    for name, value in buffers.items():
++        parent, _, leaf = name.rpartition(".")
++        setattr(model.get_submodule(parent) if parent else model, leaf, value)
 +    tokens = torch.tensor(probe["input_ids"], dtype=torch.long)
 +    with torch.no_grad():
 +        actual = model(input_ids=tokens, use_cache=False).logits[0, -1, :len(probe["logits"])].float()
@@ -404,9 +422,10 @@ index 00000000..fccdb80d
 +    if not torch.allclose(actual, expected, atol=probe["atol"], rtol=probe["rtol"]):
 +        raise ValueError(f"Cold-load probe mismatch: max_abs={(actual - expected).abs().max().item()}")
 +    result = {"weight_version": int(weight_version), "model_path": str(root), "verified": True,
-+              "tensor_count": len(state), "file_count": len(manifest["files"]),
++              "tensor_count": tensor_count, "file_count": len(manifest["files"]),
 +              "probe_max_abs": (actual - expected).abs().max().item(),
-+              "receiver_dtype": "torch.float32", "receiver_device": "cpu"}
++              "receiver_storage_dtype": "torch.float32", "receiver_forward_dtype": str(forward_dtype),
++              "receiver_dtype": str(forward_dtype), "receiver_device": "cpu"}
 +    # This receipt is outside manifest.files and does not alter published weights.
 +    temporary = root / f".receiver-receipt-{os.getpid()}.json"
 +    temporary.write_text(json.dumps(result, indent=2) + "\n")
@@ -497,17 +516,18 @@ index 00000000..ae813f79
 +    return data_world_size / global_rollout_count
 diff --git a/tests/fsdp2/test_fsdp2_export.py b/tests/fsdp2/test_fsdp2_export.py
 new file mode 100644
-index 00000000..219a0e9d
+index 00000000..54e70125
 --- /dev/null
 +++ b/tests/fsdp2/test_fsdp2_export.py
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,98 @@
++import copy
 +import importlib.util
 +import json
 +from pathlib import Path
 +
 +import pytest
 +import torch
-+from transformers import Qwen3Config, Qwen3ForCausalLM
++from transformers import AutoModelForCausalLM, Qwen3Config, Qwen3ForCausalLM
 +
 +MODULE = Path(__file__).resolve().parents[2] / "slime/backends/fsdp2_utils/export.py"
 +spec = importlib.util.spec_from_file_location("fsdp2_test_export", MODULE)
@@ -515,17 +535,28 @@ index 00000000..219a0e9d
 +spec.loader.exec_module(export)
 +
 +
-+def test_atomic_hf_export_coldload_and_tamper_detection(tmp_path):
++def _tiny_export(tmp_path, forward_dtype=torch.float32):
 +    torch.manual_seed(8)
 +    config = Qwen3Config(vocab_size=32, hidden_size=16, intermediate_size=24,
 +                         num_hidden_layers=1, num_attention_heads=2, num_key_value_heads=1, head_dim=8)
 +    config._attn_implementation = "eager"
 +    model = Qwen3ForCausalLM(config).float().eval()
 +    tokens = torch.tensor([[1, 2, 3, 4]])
++    reference = copy.deepcopy(model)
++    # FSDP casts parameters for compute while leaving floating buffers at their
++    # original precision. The reference deliberately follows that contract.
++    for parameter in reference.parameters():
++        parameter.data = parameter.data.to(forward_dtype)
 +    with torch.no_grad():
-+        logits = model(input_ids=tokens).logits[0, -1, :16].tolist()
-+    probe = {"input_ids": tokens.tolist(), "logits": logits, "atol": 1e-6, "rtol": 1e-6}
++        logits = reference(input_ids=tokens).logits[0, -1, :16].float().tolist()
++    probe = {"input_ids": tokens.tolist(), "logits": logits, "forward_dtype": str(forward_dtype),
++             "atol": 1e-6, "rtol": 1e-6}
 +    published = export.write_export(model, model.state_dict(), tmp_path, 0, probe, {"fixture": "cpu"})
++    return model, probe, published
++
++
++def test_atomic_hf_export_coldload_and_tamper_detection(tmp_path):
++    model, probe, published = _tiny_export(tmp_path)
 +    result = export.verify_exported_model(**published)
 +    assert result["verified"] and result["weight_version"] == 0 and result["probe_max_abs"] < 1e-6
 +    root = Path(published["model_path"])
@@ -540,6 +571,53 @@ index 00000000..219a0e9d
 +        stream.write(b"corrupt")
 +    with pytest.raises(ValueError, match="checksum"):
 +        export.verify_exported_model(**published)
++
++
++def test_fp32_storage_bf16_probe_with_strict_tolerance_preserves_buffers(tmp_path, monkeypatch):
++    original, _, published = _tiny_export(tmp_path, forward_dtype=torch.bfloat16)
++    real_load = AutoModelForCausalLM.from_pretrained
++    loaded = []
++
++    def capture_model(*args, **kwargs):
++        result = real_load(*args, **kwargs)
++        loaded.append(result[0])
++        return result
++
++    monkeypatch.setattr(AutoModelForCausalLM, "from_pretrained", capture_model)
++    result = export.verify_exported_model(**published)
++    assert result["verified"] and result["probe_max_abs"] < 1e-6
++    assert result["receiver_storage_dtype"] == "torch.float32"
++    assert result["receiver_forward_dtype"] == "torch.bfloat16"
++    assert all(parameter.dtype == torch.bfloat16 for parameter in loaded[0].parameters())
++    expected_buffers = dict(original.named_buffers())
++    for name, actual in loaded[0].named_buffers():
++        assert actual.dtype == expected_buffers[name].dtype == torch.float32
++        torch.testing.assert_close(actual, expected_buffers[name], rtol=0, atol=0)
++    manifest = json.loads(Path(published["manifest_path"]).read_text())
++    assert all(tensor["dtype"] == "torch.float32" for tensor in manifest["state"].values())
++
++
++@pytest.mark.parametrize("forward_dtype", [None, "torch.float16"])
++def test_receiver_rejects_missing_or_unknown_forward_dtype(tmp_path, forward_dtype):
++    _, _, published = _tiny_export(tmp_path)
++    path = Path(published["manifest_path"])
++    manifest = json.loads(path.read_text())
++    manifest["probe"]["forward_dtype"] = forward_dtype
++    path.write_text(json.dumps(manifest))
++    with pytest.raises(ValueError, match="Unsupported probe forward dtype"):
++        export.verify_exported_model(**published)
++    assert not (path.parent / "receiver-receipt.json").exists()
++
++
++def test_receiver_rejects_wrong_bf16_probe_without_relaxing_tolerance(tmp_path):
++    _, _, published = _tiny_export(tmp_path, forward_dtype=torch.bfloat16)
++    path = Path(published["manifest_path"])
++    manifest = json.loads(path.read_text())
++    manifest["probe"]["logits"][0] += 0.1
++    path.write_text(json.dumps(manifest))
++    with pytest.raises(ValueError, match="Cold-load probe mismatch"):
++        export.verify_exported_model(**published)
++    assert not (path.parent / "receiver-receipt.json").exists()
 diff --git a/tests/fsdp2/test_fsdp2_loss.py b/tests/fsdp2/test_fsdp2_loss.py
 new file mode 100644
 index 00000000..6647c1aa

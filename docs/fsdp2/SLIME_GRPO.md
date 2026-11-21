@@ -11,6 +11,8 @@
 - 默认old logprob来自更新前整批冻结策略快照。固定token不是在线采样，零附近的scalar loss不代表零梯度；实际参数变化另验。clip边界由独立非1 ratio数值测试覆盖。
 - update_weights全rank收集完整FP32 CPU状态，由rank0原子发布HF/safetensors目录。全部rank必须返回同一版本与路径，再由RolloutManager独立CPU冷加载、校验文件hash、完整key/shape/dtype/有限值与logits探针，成功才接受版本。
 
+精度协议使用manifest schema_version=2，forward_dtype必填；旧实验schema1保留作历史记录，本接收器不接收。探针明确记录forward_dtype。文件、完整加载、key/shape/dtype与有限值先按FP32 master校验，然后接收端按训练BF16前向比较并保留RoPE等浮点buffer原精度；保持0.02绝对容差加0.02相对容差。最终报告还直接审计全部safetensors文件header，确认实际存储均为F32，不以加载时强制上转FP32代替存储证据。不能将BF16训练前向直接与CPU全FP32前向当作同一计算。
+
 版本路径为初始v0、更新后v1/v2，每版含manifest.json、COMPLETE及receiver-receipt.json。这是实际文件接收链路，尚未接在线SGLang。
 
 ## 启动
@@ -30,9 +32,9 @@ skip-submodule只用于干净的固定Slime基线。构建前保存自己的生�
 
 - 核心固定环境的原生8卡3步已通过，见提交f6a86a1。
 - 14项入口/数据流CPU检查通过。
-- 6项GRPO数值与真实HF导出冷加载测试，在固定torch2.10/Transformers5.12.1容器通过。
+- 原6项GRPO数值与HF冷加载测试在固定容器通过；修复精度协议后的10项本地CPU测试通过，新增严格BF16探针、buffer保持及拒绝坏dtype/错误probe。
 - 同容器真实Ray local资源预检通过；只检查CPU任务和逻辑资源，不等于分配8张NPU。
-- Slime完整八卡GRPO待实机验收。首次启动被宿主机其他训练进程检查拦住，未分配NPU，不能当作GRPO运行失败或成功。
+- Slime完整八卡GRPO待实机验收。首次受其他任务拦截后，189561f实际进入8个actor并完成v0全CPU导出；接收器因BF16/FP32前向比较口径误拒绝。独立重建的25个初始张量全部逐元素相同，按相同前向精度修复后继续验收，尚不能写作完整GRPO通过。
 
 最终summary要求8个不同rank、(1,8)mesh、Q投影全局[4096,4096]与每rank[512,4096]、连续两次optimizer更新、每rank两微批、有限非零梯度和参数变化，以及v0/v1/v2全部版本接收。CPU测试不能替代它。
 
