@@ -1,6 +1,6 @@
 # FSDP2 开发起点
 
-本分支先增加独立的环境采集入口，供选择 MindSpeed-MM / FSDPTurbo 时核对依赖。FSDP2 训练后端、真实权重单步、DCP 恢复和导出冷加载仍待实现与验证。
+本分支先增加独立的环境采集入口。2026-11-21已选择先试FSDPTurbo，并创建私有开发仓[easiercloud/slime-ascend](https://github.com/easiercloud/slime-ascend)。FSDP2训练后端、真实权重单步、DCP恢复和导出冷加载仍待实现与验证。Turbo候选版本与检查步骤见[FSDPTURBO.md](FSDPTURBO.md)。
 
 ## 已核对的仓基线
 

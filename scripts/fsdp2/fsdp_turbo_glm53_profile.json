@@ -1,0 +1,17 @@
+{
+  "profile": "fsdp-turbo-glm53-candidate",
+  "source_url": "https://gitcode.com/Ascend/FSDPTurbo/blob/79b9ae5f6db0e3c6753ad7ff6c0f1ed20d08b09a/examples/glm5.3_flash/README.md",
+  "candidate_sha": "79b9ae5f6db0e3c6753ad7ff6c0f1ed20d08b09a",
+  "python_series": "3.12",
+  "cann_minimum": "9.2.0",
+  "packages": {
+    "torch": {"release": "2.10.0"},
+    "torch-npu": {"release": "2.10.0", "minimum_post": 4},
+    "transformers": {"release": "5.17.0"},
+    "triton": {"release": "3.6.0"},
+    "triton-ascend": {"release": "3.6.0"},
+    "tiktoken": {"release": "0.13.0"}
+  },
+  "required_modules": ["fla", "fla_npu", "triton_ascend_kernels", "cann_ops_transformer"],
+  "note": "Documented candidate profile, not a tested image lock or a hardware support guarantee. Kernel artifact revisions, wheel hashes, image digest and real BF16 assets still need to be locked. The README's FLA package naming must be reconciled before installation."
+}

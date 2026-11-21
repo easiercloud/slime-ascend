@@ -22,8 +22,10 @@ from datetime import datetime, timezone
 DISTRIBUTIONS = (
     "torch", "torch-npu", "transformers", "ray", "mindspeed", "mindspeed-mm",
     "fsdp-turbo", "triton", "triton-ascend", "flash-linear-attention",
+    "fla-core", "fla-linear-attention", "tiktoken",
 )
-MODULES = ("torch", "torch_npu", "mindspeed_mm", "fsdp_turbo", "ray")
+MODULES = ("torch", "torch_npu", "mindspeed_mm", "fsdp_turbo", "ray",
+           "fla", "fla_npu", "triton_ascend_kernels", "cann_ops_transformer")
 VERSION_FILES = (
     "/usr/local/Ascend/driver/version.info",
     "/usr/local/Ascend/ascend-toolkit/latest/version.cfg",
@@ -53,7 +55,12 @@ def collect():
     for name in MODULES:
         try:
             spec = importlib.util.find_spec(name)
-            modules[name] = None if spec is None else spec.origin
+            if spec is None:
+                modules[name] = None
+            elif spec.origin is not None:
+                modules[name] = spec.origin
+            else:
+                modules[name] = {"namespace_paths": list(spec.submodule_search_locations or [])}
         except (ImportError, ValueError, OSError) as exc:
             modules[name] = {"error": str(exc)}
     files = {}
@@ -64,14 +71,24 @@ def collect():
             files[name] = None
         except OSError as exc:
             files[name] = {"error": str(exc)}
+    revisions = {}
+    origin = modules.get("fsdp_turbo")
+    if isinstance(origin, str):
+        source_root = Path(origin).resolve().parent.parent
+        if (source_root / ".git").exists():
+            result = run_readonly(["git", "-C", str(source_root), "rev-parse", "HEAD"])
+            if result.get("exit_code") == 0:
+                revisions["fsdp_turbo"] = result["stdout"].strip()
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "collected_at_utc": datetime.now(timezone.utc).isoformat(),
         "host": {"hostname": platform.node(), "machine": platform.machine(),
                  "system": platform.system(), "release": platform.release(),
-                 "python": sys.version, "python_executable": sys.executable},
+                 "python": sys.version, "python_version": platform.python_version(),
+                 "python_executable": sys.executable},
         "packages": packages,
         "module_locations": modules,
+        "source_revisions": revisions,
         "ascend_version_files": files,
         "visible_devices": {key: os.environ.get(key) for key in (
             "ASCEND_RT_VISIBLE_DEVICES", "ASCEND_VISIBLE_DEVICES", "LOCAL_RANK", "WORLD_SIZE")},
