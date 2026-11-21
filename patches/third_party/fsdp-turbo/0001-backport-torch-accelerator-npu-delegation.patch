@@ -1,0 +1,76 @@
+From 20409188e34fd44a5bd1d2908d00333525f4fb54 Mon Sep 17 00:00:00 2001
+From: yiweiyun <1223702268@qq.com>
+Date: Sat, 21 Nov 2026 13:17:37 +0800
+Subject: [PATCH] fix(device): backport accelerator delegation for torch 2.9+
+ NPU
+
+Retain FSDPTurbo 262f5ba and Slime's pinned dependency versions while
+backporting the upstream backend-first accelerator binding and NPU
+allocator delegation. Native torch.accelerator C bindings bypass
+transfer_to_npu in torch 2.9+, which can break events, stream waits and
+memory accounting on Ascend.
+
+Only fsdp_turbo/utils/device.py changes. The function AST matches the
+upstream implementation after cef4e994; the long upstream explanation
+is shortened to comply with the current development guide. No model,
+configuration, dependency, Docker or host compatibility change is made.
+
+Validation: git diff --check; AST equivalence; mocked NPU/CUDA backend
+selection and API delegation, with the unmodified base as a failing
+negative control. Real torch 2.10/NPU and FSDP8 validation is pending.
+
+Base-commit: 262f5ba4ae266d62b01c7e8a2e2bc46d46d1a0c3
+Backport-of: 46dd1d1e87170a2180ceab4c3e5623f34304fe2e
+Backport-of: cef4e9948f273a7e194ee4343511bc0a2240dbb7
+---
+ fsdp_turbo/utils/device.py | 24 ++++++++++++++++++++++--
+ 1 file changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/fsdp_turbo/utils/device.py b/fsdp_turbo/utils/device.py
+index 9f4a3dc3063d22ce28dd7d1be8e4f5eb225c339b..da1ac62dedd5fb2320d2f4926ff1466a1f4d36ef 100644
+--- a/fsdp_turbo/utils/device.py
++++ b/fsdp_turbo/utils/device.py
+@@ -17,7 +17,7 @@ def accelerator_getattr(module, fallback_module):
+     return __getattr__
+ 
+ 
+-def set_accelerator_compatible():
++def set_accelerator_compatible() -> str:
+     """Set up ``torch.accelerator`` to delegate to the detected device backend.
+ 
+     Automatically detects the available accelerator in the following order:
+@@ -45,10 +45,30 @@ def set_accelerator_compatible():
+ 
+     accelerator_module = types.ModuleType('torch.accelerator')
+     accelerator_module.__doc__ = f'Fallback accelerator module that delegates to {fallback_module}'
++    # Prefer backend APIs: torch 2.9+ accelerator C bindings bypass transfer_to_npu.
+     for attr in dir(torch.accelerator):
+         if attr.startswith('__'):
+             continue
+-        setattr(accelerator_module, attr, getattr(torch.accelerator, attr))
++        if hasattr(fallback_module, attr):
++            setattr(accelerator_module, attr, getattr(fallback_module, attr))
++        else:
++            setattr(accelerator_module, attr, getattr(torch.accelerator, attr))
++
++    # torch_npu uses its own allocator rather than PyTorch's DeviceAllocator.
++    # Existing generic memory functions therefore also need backend delegation.
++    if backend == "hccl":
++        for name in (
++            "empty_cache",
++            "memory_allocated",
++            "memory_reserved",
++            "max_memory_allocated",
++            "max_memory_reserved",
++            "memory_stats",
++            "reset_peak_memory_stats",
++            "reset_accumulated_memory_stats",
++        ):
++            if hasattr(fallback_module, name):
++                setattr(accelerator_module, name, getattr(fallback_module, name))
+ 
+     accelerator_module.__getattr__ = accelerator_getattr(accelerator_module, fallback_module)
+     torch.accelerator = accelerator_module
+-- 
+2.39.5 (Apple Git-154)
+
