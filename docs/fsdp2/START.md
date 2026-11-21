@@ -1,6 +1,6 @@
 # FSDP2 开发起点
 
-本分支先增加独立的环境采集入口。2026-11-21已选择先试FSDPTurbo，并创建私有开发仓[easiercloud/slime-ascend](https://github.com/easiercloud/slime-ascend)。FSDP2训练后端、真实权重单步、DCP恢复和导出冷加载仍待实现与验证。Turbo候选版本与检查步骤见[FSDPTURBO.md](FSDPTURBO.md)。
+本分支先增加独立的环境采集入口。2026-11-21已选择先试FSDPTurbo，并创建私有开发仓[easiercloud/slime-ascend](https://github.com/easiercloud/slime-ascend)。最新首轮目标改为[Qwen3-8B减层、随机初始化八卡最小训练](MINIMAL_QWEN3.md)，不再要求GLM-5.3-Flash、真实BF16权重或GLM专属的CANN9.2推荐环境。Slime FSDP2训练后端、DCP恢复和导出冷加载仍待实现与验证。原GLM候选资料保留在[FSDPTURBO.md](FSDPTURBO.md)，不作为本轮Qwen3冒烟的门禁。
 
 ## 已核对的仓基线
 
