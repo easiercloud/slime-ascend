@@ -1,0 +1,94 @@
+{
+  "scope": "Slime fixed-rollout FSDP2 GRPO and offline HF cold-load receiver",
+  "training_commit": "9cdf46c6c44b26654ba0ac0d3f1a93f37d6e9946",
+  "date": "2026-11-21",
+  "model": {
+    "type": "qwen3",
+    "layers": 2,
+    "random_initialization": true,
+    "parameters": 1630556672
+  },
+  "runtime": {
+    "torch": "2.10.0+cpu",
+    "torch_npu": "2.10.0.post6",
+    "transformers": "5.12.1",
+    "turbo_sha": "20409188e34fd44a5bd1d2908d00333525f4fb54",
+    "parameter_dtype": "torch.float32",
+    "forward_dtype": "torch.bfloat16",
+    "reduce_dtype": "torch.float32"
+  },
+  "completed_ranks": 8,
+  "rollouts": 2,
+  "optimizer_steps_per_rank": 2,
+  "microbatches_per_update": 2,
+  "steps": [
+    {
+      "rollout_id": 0,
+      "optimizer_step": 1,
+      "rank": 0,
+      "loss": -7.450580596923828e-09,
+      "clip_fraction": 0.0,
+      "global_grad_norm": 13.071874439696378,
+      "q_projection_update_l2": 0.004092290611369278,
+      "data_domain": 8,
+      "microbatches": 2
+    },
+    {
+      "rollout_id": 1,
+      "optimizer_step": 2,
+      "rank": 0,
+      "loss": -2.2351741790771484e-08,
+      "clip_fraction": 0.0,
+      "global_grad_norm": 13.06958341417649,
+      "q_projection_update_l2": 0.004073359479892513,
+      "data_domain": 8,
+      "microbatches": 2
+    }
+  ],
+  "weight_versions": [
+    0,
+    1,
+    2
+  ],
+  "receivers": [
+    {
+      "weight_version": 0,
+      "tensor_count": 25,
+      "verified": true,
+      "probe_max_abs": 0.015625,
+      "storage_dtype": "torch.float32",
+      "forward_dtype": "torch.bfloat16"
+    },
+    {
+      "weight_version": 1,
+      "tensor_count": 25,
+      "verified": true,
+      "probe_max_abs": 0.01953125,
+      "storage_dtype": "torch.float32",
+      "forward_dtype": "torch.bfloat16"
+    },
+    {
+      "weight_version": 2,
+      "tensor_count": 25,
+      "verified": true,
+      "probe_max_abs": 0.01171875,
+      "storage_dtype": "torch.float32",
+      "forward_dtype": "torch.bfloat16"
+    }
+  ],
+  "checkpoint_storage_headers": "All 25 tensors in each of the three exports are F32; payload hashes change after every update.",
+  "training_exit_code": null,
+  "exit_note": "SSH disconnected before final process status could be captured. The complete post-train driver summary, 8 rank records, 3 receiver receipts and storage audit were recovered and verified with exit code 0.",
+  "online_generation": false,
+  "dcp_resume": false,
+  "observed_local_npu_ids": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ]
+}
