@@ -1,0 +1,388 @@
+From 91ac2dacc08d64221e92217419b29d1d0fb18ce9 Mon Sep 17 00:00:00 2001
+From: easiercloud <1223702268@qq.com>
+Date: Sat, 21 Nov 2026 12:00:00 +0800
+Subject: [PATCH] Add strict offline FSDP2 actor entry and verified HF weight handoff
+
+Keep the Megatron path while selecting the FSDP2 actor through Slime's
+existing factory. The initial scope is fixed-rollout GRPO on eight NPUs.
+Validate all-rank versioned exports and cold-load them in the real rollout
+manager. Defer serving-only dependencies for offline training.
+
+diff --git a/slime/utils/arguments.py b/slime/utils/arguments.py
+--- a/slime/utils/arguments.py
++++ b/slime/utils/arguments.py
+@@ -8,9 +8,6 @@
+ 
+ import yaml
+ 
+-from slime.backends.sglang_utils.arguments import sglang_parse_args
+-from slime.backends.sglang_utils.arguments import validate_args as sglang_validate_args
+-from slime.backends.sglang_utils.external import apply_external_engine_info_to_args
+ from slime.observability.logging_utils import configure_logger
+ from slime.utils.eval_config import EvalDatasetConfig, build_eval_dataset_configs, ensure_dataset_list
+ 
+@@ -1721,7 +1718,7 @@
+     the final ``args`` after Phase 2 parsing.
+     """
+     temp_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+-    temp_parser.add_argument("--train-backend", type=str, choices=["megatron"], default="megatron")
++    temp_parser.add_argument("--train-backend", type=str, choices=["megatron", "fsdp2"], default="megatron")
+     temp_parser.add_argument("--debug-rollout-only", action="store_true", default=False)
+     temp_parser.add_argument("--debug-train-only", action="store_true", default=False)
+     temp_parser.add_argument("--load-debug-rollout-data", type=str, default=None)
+@@ -1741,12 +1738,20 @@
+     add_slime_arguments = get_slime_extra_args_provider(add_custom_arguments)
+ 
+     pre = _pre_parse_mode()
++    if pre.train_backend == "fsdp2":
++        from slime.utils.fsdp2_arguments import parse_fsdp2_args
++
++        args = parse_fsdp2_args(add_slime_arguments)
++        return (args, None) if return_restore_plan else args
++
+     skip_sglang = pre.debug_train_only or pre.load_debug_rollout_data is not None
+ 
+     # Phase 1: Parse sglang args independently (separate parser, parse_known_args).
+     # Skipped when sglang servers are not needed.
+     sglang_ns = None
+     if not skip_sglang:
++        from slime.backends.sglang_utils.arguments import sglang_parse_args
++
+         sglang_ns = sglang_parse_args()
+ 
+     # Phase 2: Parse megatron + slime args.
+@@ -1775,6 +1780,8 @@
+         megatron_validate_args(args)
+ 
+     if not args.debug_train_only:
++        from slime.backends.sglang_utils.arguments import validate_args as sglang_validate_args
++
+         sglang_validate_args(args)
+ 
+     return (args, restore_plan) if return_restore_plan else args
+@@ -1902,6 +1909,8 @@
+ 
+ 
+ def slime_validate_args(args):
++    from slime.backends.sglang_utils.external import apply_external_engine_info_to_args
++
+     from slime.utils.ppo_utils import get_pg_loss_type
+     from slime.utils.score_centering import validate_score_centering_args
+ 
+diff --git a/slime/ray/placement_group.py b/slime/ray/placement_group.py
+--- a/slime/ray/placement_group.py
++++ b/slime/ray/placement_group.py
+@@ -182,6 +182,10 @@
+ 
+ 
+ def create_actor_model(args, pgs, rollout_manager, actor_cls=None):
++    if actor_cls is None and getattr(args, "train_backend", "megatron") == "fsdp2":
++        from slime.backends.fsdp2_utils.actor import FSDP2TrainRayActor
++
++        actor_cls = FSDP2TrainRayActor
+     actor_args = args
+     if args.megatron_config_path is not None:
+         from slime.utils.arguments import parse_megatron_role_args
+diff --git a/slime/ray/actor_group.py b/slime/ray/actor_group.py
+--- a/slime/ray/actor_group.py
++++ b/slime/ray/actor_group.py
+@@ -57,7 +57,10 @@
+         self._with_ref = with_ref
+         self._with_opd_teacher = with_opd_teacher
+         self._rollout_manager = None
+-        self._disk_weight_version = getattr(args, "update_weight_start_version", 0)
++        self._disk_weight_version = (
++            -1 if getattr(args, "train_backend", "megatron") == "fsdp2"
++            else getattr(args, "update_weight_start_version", 0)
++        )
+         self._actor_handlers = []
+ 
+     def _allocate_gpus_for_actor(self, pg, num_gpus_per_actor):
+@@ -184,7 +187,16 @@
+ 
+         weight_version = self._disk_weight_version + 1
+         disk_weight_dir = Path(self.args.update_weight_disk_dir) / f"weight_v{weight_version:06d}"
+-        ray.get([actor.update_weights.remote() for actor in self._actor_handlers])
++        results = ray.get([actor.update_weights.remote() for actor in self._actor_handlers])
++        if getattr(self.args, "train_backend", "megatron") == "fsdp2":
++            publication = validate_fsdp2_publication(results, disk_weight_dir, weight_version)
++            if self._rollout_manager is None:
++                raise RuntimeError("FSDP2 export requires its offline verification receiver")
++            receipt = ray.get(self._rollout_manager.accept_fsdp2_weights.remote(**publication))
++            if not isinstance(receipt, dict) or receipt.get("verified") is not True:
++                raise RuntimeError("Offline FSDP2 receiver did not verify the exported model")
++            self._disk_weight_version = weight_version
++            return receipt
+         self._disk_weight_version = weight_version
+         if self._release_train_enabled():
+             self.release()
+@@ -294,3 +306,23 @@
+         if not self.args.update_weight_disk_keep_files:
+             shutil.rmtree(disk_weight_dir, ignore_errors=True)
+         ray.get([engine.continue_generation.remote() for engine in engines])
++
++
++def validate_fsdp2_publication(results, disk_weight_dir, weight_version):
++    """Require every rank to agree before the independent receiver reads files."""
++    if len(results) != 8 or any(not isinstance(result, dict) for result in results):
++        raise RuntimeError("Every FSDP2 rank must return a publication descriptor")
++    expected_dir = Path(disk_weight_dir).resolve()
++    expected = {
++        "weight_version": weight_version,
++        "model_path": str(expected_dir),
++        "manifest_path": str(expected_dir / "manifest.json"),
++    }
++    for result in results:
++        if type(result.get("weight_version")) is not int or result["weight_version"] != weight_version:
++            raise RuntimeError("FSDP2 rank published an unexpected weight version")
++        if any(result.get(key) != value for key, value in expected.items()):
++            raise RuntimeError("FSDP2 ranks disagree on the expected publication paths/version")
++    if not (expected_dir / "manifest.json").is_file() or not (expected_dir / "COMPLETE").is_file():
++        raise RuntimeError("FSDP2 export was not atomically completed")
++    return expected
+diff --git a/slime/ray/rollout.py b/slime/ray/rollout.py
+--- a/slime/ray/rollout.py
++++ b/slime/ray/rollout.py
+@@ -148,6 +148,32 @@
+             self.recovery.source_state = self._source_state()
+             self.recovery.persist()
+ 
++    def accept_fsdp2_weights(self, model_path, weight_version, manifest_path):
++        """Cold-load a complete HF export; this is offline verification, not serving."""
++        if self.args.train_backend != "fsdp2" or not self.args.fsdp_fixed_rollout:
++            raise RuntimeError("Offline FSDP2 receiver requires the fixed-rollout backend")
++        expected_version = getattr(self.args, "fsdp_weight_version", -1) + 1
++        if type(weight_version) is not int or weight_version != expected_version:
++            raise RuntimeError(f"Expected FSDP2 weight version {expected_version}, got {weight_version}")
++        expected_dir = Path(self.args.update_weight_disk_dir) / f"weight_v{weight_version:06d}"
++        if Path(model_path).resolve() != expected_dir.resolve():
++            raise RuntimeError("FSDP2 receiver model path does not match the versioned export directory")
++        if Path(manifest_path).resolve() != (expected_dir / "manifest.json").resolve():
++            raise RuntimeError("FSDP2 receiver manifest does not belong to the exported model")
++        receiver = load_function(self.args.fsdp_weight_receiver_path)
++        receipt = receiver(model_path=model_path, manifest_path=manifest_path, weight_version=weight_version)
++        if (not isinstance(receipt, dict) or receipt.get("verified") is not True
++                or receipt.get("weight_version") != weight_version or receipt.get("model_path") != str(expected_dir)):
++            raise RuntimeError("FSDP2 receiver returned an invalid verification receipt")
++        # Publish the acceptance boundary only after the independent load succeeds.
++        self.args.fsdp_weight_version = weight_version
++        self.training_weight_version = weight_version
++        self.weight_version = weight_version
++        if not hasattr(self, "fsdp2_weight_receipts"):
++            self.fsdp2_weight_receipts = []
++        self.fsdp2_weight_receipts.append(receipt)
++        return receipt
++
+     def pause_rollout_admission(self):
+         """Stop the distributed producer before engines drain for a weight update."""
+         worker = getattr(self.data_source, "consumers", {}).get("fully_async")
+@@ -179,7 +205,6 @@
+ 
+     def attach_training(self, args, deployment):
+         """Bind a driver to the same serving owner, including after manager death."""
+-        from slime.data.queue_data_source import QueueDataSource
+         from slime.ray.training_recovery import TrainingResume
+ 
+         was_paused = self.pause_rollout_admission()
+@@ -190,6 +215,8 @@
+         self.pg = deployment.placements["rollout"]
+         self.servers = deployment.servers
+         if self.recovery is not None:
++            from slime.data.queue_data_source import QueueDataSource
++
+             self.recovery.reconcile_checkpoint()
+             if isinstance(self.data_source, QueueDataSource):
+                 # A queue commit can succeed while its RPC fails. Reconcile on
+@@ -263,6 +290,8 @@
+             self.recovery.checkpoint_committed(rollout_id)
+ 
+     def get_weight_version(self):
++        if getattr(self.args, "train_backend", "megatron") == "fsdp2":
++            return self.args.fsdp_weight_version
+         if self.serving is not None:
+             return ray.get(self.serving.get_weight_version.remote())
+         server = self._get_updatable_server()
+diff --git a/slime/ray/serving.py b/slime/ray/serving.py
+--- a/slime/ray/serving.py
++++ b/slime/ray/serving.py
+@@ -36,7 +36,6 @@
+     """A named, detached owner for routers, engines and their GPU placements."""
+ 
+     def __init__(self, args, restore_plan):
+-        from slime.backends.sglang_utils.deployment import start_rollout_servers
+         from slime.observability.logging_utils import configure_logger
+         from slime.ray.placement_group import create_placement_groups
+ 
+@@ -60,6 +59,9 @@
+             # actor can fail before any driver obtains a usable deployment.
+             self.placements = create_placement_groups(args)
+             try:
++                if not args.debug_train_only:
++                    from slime.backends.sglang_utils.deployment import start_rollout_servers
++
+                 self.servers, handles = (
+                     ({}, []) if args.debug_train_only else start_rollout_servers(args, self.placements["rollout"])
+                 )
+@@ -125,10 +127,11 @@
+     def attach_training(self, args, job_id):
+         from ray.util.placement_group import remove_placement_group
+ 
+-        from slime.backends.sglang_utils.engine_group import reset_weights_update_groups
+         from slime.ray.placement_group import _create_placement_group
+ 
+         self.validate_attachment(args)
++        if getattr(args, "train_backend", "megatron") == "fsdp2" and self.attachments:
++            raise ValueError("FSDP2 recovery/serving reuse is not implemented; use a fresh rollout session")
+         args = copy.deepcopy(args)
+         # Only a validated successor may touch the old trainer's resources.
+         # Stop health checks before replacing connections or GPU allocations.
+@@ -147,6 +150,8 @@
+             self.placements["actor"] = _create_placement_group(count)
+             self.placements["critic"] = self.placements["actor"] if args.use_critic else None
+         if reused:
++            from slime.backends.sglang_utils.engine_group import reset_weights_update_groups
++
+             # NCCL groups and a possibly held lock belong to the old trainer.
+             # Engines survive; their next update reconnects to the new trainer.
+             reset_weights_update_groups(
+diff --git a/slime/utils/fsdp2_arguments.py b/slime/utils/fsdp2_arguments.py
+new file mode 100644
+--- /dev/null
++++ b/slime/utils/fsdp2_arguments.py
+@@ -0,0 +1,134 @@
++"""Strict, Megatron-independent arguments for the first offline FSDP2 GRPO path."""
++
++import argparse
++import json
++import os
++from pathlib import Path
++
++
++def parse_fsdp2_args(add_slime_arguments, argv=None):
++    parser = argparse.ArgumentParser(allow_abbrev=False)
++    add_slime_arguments(parser)
++    parser.add_argument("--train-backend", choices=["fsdp2"], default="fsdp2")
++    parser.add_argument("--debug-train-only", action="store_true")
++    parser.add_argument("--debug-rollout-only", action="store_true")
++    parser.add_argument("--load-debug-rollout-data")
++    parser.add_argument("--fsdp-fixed-rollout", action="store_true", help="Use fixed tokens/rewards; no online generation")
++    parser.add_argument("--fsdp-model-config", required=True, help="Local Qwen3 configuration JSON")
++    parser.add_argument("--fsdp-turbo-config", help="Optional validated FSDPTurbo YAML plan")
++    parser.add_argument("--fsdp-random-init", action="store_true")
++    parser.add_argument(
++        "--fsdp-weight-receiver-path", default="slime.backends.fsdp2_utils.export.verify_exported_model"
++    )
++    parser.add_argument("--use-critic", action="store_true")
++    for option in ("tensor-model-parallel-size", "pipeline-model-parallel-size", "context-parallel-size",
++                   "expert-model-parallel-size", "expert-tensor-parallel-size"):
++        parser.add_argument("--" + option, type=int, default=1)
++    parser.add_argument("--bf16", action="store_true")
++    parser.set_defaults(
++        rollout_function_path="fixed_rollout.generate_rollout",
++        data_source_path="fixed_rollout.FixedDataSource",
++        distributed_backend="hccl", update_weight_transport="disk", update_weight_disk_keep_files=True,
++    )
++    args = parser.parse_args(argv)
++
++    def require(condition, message):
++        if not condition:
++            parser.error("fsdp2: " + message)
++
++    require(isinstance(args.train_env_vars, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in args.train_env_vars.items()),
++            "train-env-vars must be a JSON object with string keys/values")
++    require(args.rollout_top_p == 1.0 and args.rollout_top_k == -1, "sampler support replay is not implemented")
++    require(args.over_sampling_batch_size in (None, args.rollout_batch_size), "oversampling is not implemented")
++    require(args.fsdp_fixed_rollout, "first implementation requires --fsdp-fixed-rollout")
++    require(args.fsdp_random_init, "first implementation requires --fsdp-random-init")
++    require(args.actor_num_nodes == 1 and args.actor_num_gpus_per_node == 8, "requires one node with eight NPUs")
++    require(args.num_gpus_per_node == 8, "--num-gpus-per-node must be 8")
++    require(args.distributed_backend == "hccl", "--distributed-backend must be hccl")
++    for name in ("tensor_model_parallel_size", "pipeline_model_parallel_size", "context_parallel_size",
++                 "expert_model_parallel_size", "expert_tensor_parallel_size"):
++        require(getattr(args, name) == 1, name + " must be 1")
++    require(args.num_rollout is not None and args.num_rollout > 0, "requires positive --num-rollout")
++    require(args.num_epoch is None, "epoch-derived scheduling is not implemented")
++    require(args.n_samples_per_prompt >= 2, "GRPO requires --n-samples-per-prompt >= 2")
++    require(args.rollout_batch_size > 0 and args.micro_batch_size > 0, "batch sizes must be positive")
++    expected_batch = args.rollout_batch_size * args.n_samples_per_prompt
++    if args.global_batch_size is None:
++        args.global_batch_size = expected_batch
++    require(args.global_batch_size == expected_batch, "one optimizer step per rollout requires global batch = prompt groups * responses")
++    require(args.global_batch_size % (8 * args.micro_batch_size) == 0, "global batch must divide eight ranks times micro batch")
++    require(args.num_steps_per_rollout in (None, 1), "only one optimizer step per rollout is implemented")
++    require(args.advantage_estimator == "grpo" and args.loss_type == "policy_loss", "only GRPO policy loss is implemented")
++    require(args.pg_loss_type in (None, "ppo"), "only clipped PPO-style GRPO loss is implemented")
++    require(args.compute_advantages_and_returns and args.rewards_normalization, "requires global BatchBuilder reward normalization")
++    require(args.rollout_data_transport == "object-store", "first implementation requires object-store transport")
++    require(args.update_weight_mode == "full" and args.update_weight_transport == "disk", "requires full disk HF weight publication")
++    require(args.update_weight_disk_dir is not None, "--update-weight-disk-dir is required")
++    require(args.update_weight_disk_keep_files, "export evidence must be retained")
++    require(args.rollout_num_gpus in (None, 0), "fixed rollout uses no serving NPUs")
++    require(args.start_rollout_id in (None, 0), "recovery/resume is not implemented")
++    require(args.save_interval is None and args.save is None and args.save_hf is None,
++            "DCP/optimizer checkpoints are not implemented; HF weight exports use update-weight-disk-dir")
++    require(args.eval_interval is None and args.eval_config is None and args.eval_prompt_data is None, "evaluation is not implemented")
++    require(args.eps_clip >= 0 and (args.eps_clip_high is None or args.eps_clip_high >= 0), "clip ranges must be nonnegative")
++    require(args.lr > 0 and args.clip_grad > 0 and args.rollout_temperature > 0, "lr, clip-grad and temperature must be positive")
++    require(args.kl_coef == 0 and args.kl_loss_coef == 0 and args.entropy_coef == 0,
++            "KL and entropy penalties are not implemented")
++    disabled = (
++        "debug_rollout_only", "use_critic", "use_kl_loss", "use_unbiased_kl", "use_opd", "use_tis", "use_opsm",
++        "normalize_advantages", "use_score_centering", "use_rollout_entropy", "get_mismatch_metrics",
++        "calculate_per_token_loss", "use_dynamic_batch_size", "balance_data", "balance_by_flops",
++        "colocate", "offload", "offload_train", "offload_rollout", "release_train", "use_fault_tolerance",
++        "partial_rollout", "mask_offpolicy_in_partial_rollout", "use_routing_replay", "use_rollout_routing_replay",
++        "enable_mtp_training", "reset_optimizer_states", "use_stateless_adam", "freeze_indexer", "allgather_cp",
++        "check_weight_update_equal", "async_save", "post_self_attn_layernorm", "post_mlp_layernorm",
++    )
++    for name in disabled:
++        require(not getattr(args, name, False), name + " is not implemented")
++    unsupported_paths = (
++        "load", "hf_checkpoint", "ref_load", "opd_teacher_load", "megatron_config_path", "custom_model_provider_path",
++        "custom_loss_function_path", "custom_advantage_function_path", "custom_tis_function_path",
++        "custom_pg_loss_reducer_function_path", "custom_reward_post_process_path", "custom_convert_samples_to_train_data_path",
++        "custom_update_weight_post_write_path", "update_weight_local_checkpoint_dir", "custom_config_path",
++        "load_debug_rollout_data", "load_forge_rollout_data", "save_debug_rollout_data", "prompt_data",
++        "rollout_external_engine_addrs", "rollout_buffer_url", "custom_generate_function_path",
++        "custom_megatron_init_path", "custom_megatron_before_log_prob_hook_path", "custom_megatron_before_train_step_hook_path",
++        "only_train_params_name_list", "freeze_params_name_list", "ref_update_interval", "eps_clip_c", "mtp_num_layers",
++    )
++    for name in unsupported_paths:
++        require(getattr(args, name, None) is None, name + " is not implemented")
++    config_path = Path(args.fsdp_model_config).expanduser().resolve()
++    require(config_path.is_file(), "model configuration JSON does not exist")
++    with config_path.open() as file:
++        config = json.load(file)
++    require(config.get("model_type") == "qwen3", "first implementation supports dense Qwen3 only")
++    require(config.get("num_hidden_layers", 0) > 0, "model configuration must define positive layer count")
++    args.fsdp_model_config = str(config_path)
++    if args.fsdp_turbo_config is not None:
++        path = Path(args.fsdp_turbo_config).expanduser().resolve()
++        require(path.is_file(), "Turbo plan does not exist")
++        args.fsdp_turbo_config = str(path)
++    for name in ("HCCL_NPU_SOCKET_PORT_RANGE", "HCCL_HOST_SOCKET_PORT_RANGE"):
++        if name in os.environ:
++            args.train_env_vars.setdefault(name, os.environ[name])
++    args.train_env_vars.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
++    args.update_weight_disk_dir = str(Path(args.update_weight_disk_dir).expanduser().resolve())
++    args.debug_train_only = True
++    args.debug_rollout_only = False
++    args.rollout_external = False
++    args.rollout_num_gpus = 0
++    args.offload_train = args.offload_rollout = False
++    args.bf16 = True
++    args.use_critic = False
++    args.pg_loss_type = "ppo"
++    args.eval_function_path = args.eval_function_path or args.rollout_function_path
++    args.eps_clip_high = args.eps_clip if args.eps_clip_high is None else args.eps_clip_high
++    args.over_sampling_batch_size = args.over_sampling_batch_size or args.rollout_batch_size
++    args.num_steps_per_rollout = 1
++    args.update_weight_start_version = -1
++    args.fsdp_weight_version = -1
++    args.ckpt_step = None
++    args.num_layers = config["num_hidden_layers"]
++    args.num_experts = None
++    args.moe_router_topk = 1
++    return args
+-- 
+2.50.1

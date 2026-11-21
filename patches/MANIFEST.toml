@@ -64,6 +64,16 @@ base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
 sha256 = "cd1a66c93b1d325d67ce14d91608eb4595c4d40b4b9725abd07bd1438e229203"
 
 [[patches]]
+id = "slime:features:fsdp2-turbo-entry"
+category = "features"
+target = "slime"
+file = "fsdp2-turbo-entry.patch"
+summary = "Select the FSDP2 actor without Megatron parsing and verify versioned full HF exports in offline RolloutManager"
+issue = "SLIME-FSDP2-ENTRY"
+base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
+sha256 = "6a57d264dc925f1935cf3e051e80a9bf98257129563519bb1e5242befa66127b"
+
+[[patches]]
 id = "mbridge:npu-device"
 category = "third_party"
 target = "mbridge"
@@ -232,3 +242,13 @@ summary = "Backport upstream NPU accelerator delegation while retaining Slime de
 issue = "SLIME-FSDP2-RUNTIME"
 base_commit = "262f5ba4ae266d62b01c7e8a2e2bc46d46d1a0c3"
 sha256 = "f3be7c40b138e09ebedb09d12ee06e4a21046860da44080297bec461b50cef31"
+
+[[patches]]
+id = "slime:features:fsdp2-turbo-actor"
+category = "features"
+target = "slime"
+file = "fsdp2-turbo-actor.patch"
+summary = "Dense FSDPTurbo Ray actor, response GRPO loss and versioned verified HF exports"
+issue = "SLIME-FSDP2-GRPO"
+base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
+sha256 = "c0a387f96f7a8199143824314711bab9cd4cb64bd2db155d609dab55a38c4570"

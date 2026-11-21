@@ -1,0 +1,647 @@
+From d29788f149ce407cfc3a11bbadd6d6e1e301fd74 Mon Sep 17 00:00:00 2001
+From: yiweiyun <1223702268@qq.com>
+Date: Sat, 21 Nov 2026 13:27:40 +0800
+Subject: [PATCH] Add dense FSDPTurbo Ray actor, GRPO objective and verified HF
+ exports
+
+Signed-off-by: yiweiyun <1223702268@qq.com>
+---
+ slime/backends/fsdp2_utils/__init__.py |   1 +
+ slime/backends/fsdp2_utils/actor.py    | 269 +++++++++++++++++++++++++
+ slime/backends/fsdp2_utils/export.py   | 104 ++++++++++
+ slime/backends/fsdp2_utils/loss.py     |  77 +++++++
+ tests/fsdp2/test_fsdp2_export.py       |  39 ++++
+ tests/fsdp2/test_fsdp2_loss.py         |  96 +++++++++
+ 6 files changed, 586 insertions(+)
+ create mode 100644 slime/backends/fsdp2_utils/__init__.py
+ create mode 100644 slime/backends/fsdp2_utils/actor.py
+ create mode 100644 slime/backends/fsdp2_utils/export.py
+ create mode 100644 slime/backends/fsdp2_utils/loss.py
+ create mode 100644 tests/fsdp2/test_fsdp2_export.py
+ create mode 100644 tests/fsdp2/test_fsdp2_loss.py
+
+diff --git a/slime/backends/fsdp2_utils/__init__.py b/slime/backends/fsdp2_utils/__init__.py
+new file mode 100644
+index 00000000..735240f2
+--- /dev/null
++++ b/slime/backends/fsdp2_utils/__init__.py
+@@ -0,0 +1 @@
++"""Minimal dense-model FSDPTurbo backend; no Megatron imports."""
+diff --git a/slime/backends/fsdp2_utils/actor.py b/slime/backends/fsdp2_utils/actor.py
+new file mode 100644
+index 00000000..de37c78a
+--- /dev/null
++++ b/slime/backends/fsdp2_utils/actor.py
+@@ -0,0 +1,269 @@
++"""Minimal Slime Ray actor for dense random-initialized Qwen3 FSDP8 GRPO."""
++
++import importlib.metadata
++import json
++import math
++from pathlib import Path
++import subprocess
++
++import torch
++import torch.distributed as dist
++from torch.distributed.tensor import DTensor
++
++from slime.ray.train_actor import TrainRayActor
++from slime.utils import accelerator
++from slime.utils.data import process_rollout_data
++from slime.utils.distributed_utils import get_gloo_group
++
++from .export import write_export
++from .loss import backward_scale, grpo_contribution, response_log_probs
++
++
++class FSDP2TrainRayActor(TrainRayActor):
++    def init(self, args, role, with_ref=False, with_opd_teacher=False):
++        if role != "actor" or with_ref or with_opd_teacher:
++            raise ValueError("The minimal FSDP2 backend supports only the actor, without reference or teacher")
++        if getattr(args, "load", None) or getattr(args, "save", None):
++            raise ValueError("DCP optimizer/RNG resume is a later stage; use disk update_weights for HF export")
++        super().init(args, role, with_ref, with_opd_teacher)
++        if dist.get_world_size() != 8 or accelerator.device_type() != "npu":
++            raise ValueError("This implementation requires exactly eight Ascend training ranks")
++        from fsdp_turbo.fsdp_turbo import FSDPTurbo
++        from fsdp_turbo.fsdp_turbo_config import DistributedConfig, FSDPPlanConfig, FSDPTurboConfig, MemoryConfig
++        from fsdp_turbo.utils.device import set_accelerator_compatible
++        from transformers import Qwen3Config, Qwen3ForCausalLM
++
++        # Slime already created WORLD. Older Turbo only installs its NPU
++        # torch.accelerator delegation inside its own PG-init branch, which
++        # is therefore skipped here. Install delegation explicitly, without
++        # initializing a second process group.
++        if set_accelerator_compatible() != "hccl":
++            raise RuntimeError("FSDPTurbo did not select the Ascend HCCL runtime")
++        torch.manual_seed(args.seed)
++        config = Qwen3Config.from_dict(json.loads(Path(args.fsdp_model_config).read_text()))
++        if config.model_type != "qwen3" or getattr(config, "num_experts", 0):
++            raise ValueError("Only the dense Qwen3 configuration is supported")
++        config._attn_implementation = "eager"
++        config.use_cache = False
++        runtime_config = FSDPTurboConfig(
++            distributed=DistributedConfig(
++                fully_shard_parallel_size=8, tensor_parallel_size=1, expert_parallel_size=1,
++                fsdp_plan=FSDPPlanConfig(
++                    apply_modules={"model.layers.{*}": {}, "model.embed_tokens": {}, "lm_head": {}},
++                    param_dtype="bf16", reduce_dtype="fp32", output_dtype="bf16",
++                    fsdp_implementation="native", num_to_forward_prefetch=0, num_to_backward_prefetch=0)),
++            memory=MemoryConfig(recompute=False))
++        if getattr(args, "fsdp_turbo_config", None):
++            from fsdp_turbo.fsdp_turbo_config import load_config_from_yaml
++
++            supplied = load_config_from_yaml(args.fsdp_turbo_config)
++            # A YAML may only express this validated minimal runtime. Do not
++            # silently ignore a quantization/CP/offload plan supplied by a user.
++            if supplied.distributed != runtime_config.distributed or supplied.memory != runtime_config.memory:
++                raise ValueError("The first FSDP2 implementation requires the native dense FSDP8 plan")
++            if supplied.module_patches or supplied.quantization != runtime_config.quantization:
++                raise ValueError("Module patches and quantization are outside the minimal backend")
++        self.model = FSDPTurbo(runtime_config, Qwen3ForCausalLM(config))
++        self.hf_model = self.model.model
++        self.hf_config = config
++        self.device = accelerator.device()
++        self.data_world_size = dist.get_world_size()
++        self.data_rank = dist.get_rank()
++        self.train_parallel_config = {"dp_size": self.data_world_size, "cp_size": 1,
++                                      "vpp_size": 1, "microbatch_group_size_per_vp_stage": 1}
++        self.watched = next(p for n, p in self.model.named_parameters()
++                            if n.endswith("layers.0.self_attn.q_proj.weight"))
++        for parameter in self.model.parameters():
++            if not isinstance(parameter, DTensor) or parameter.to_local().numel() * 8 != parameter.numel():
++                raise RuntimeError("Expected every parameter to be an actual eight-way FSDP shard")
++        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=args.lr, foreach=False,
++                                           betas=(getattr(args, "adam_beta1", 0.9), getattr(args, "adam_beta2", 0.999)),
++                                           eps=getattr(args, "adam_eps", 1e-8),
++                                           weight_decay=getattr(args, "weight_decay", 0.0))
++        self.weight_version = int(getattr(args, "update_weight_start_version", -1))
++        self.step = 0
++        self.step_records = []
++        print(json.dumps({"backend": "fsdp2", "data_domain": self.data_world_size,
++                          "rank": self.data_rank, "mesh": list(self.watched.device_mesh.shape),
++                          "placements": [str(x) for x in self.watched.placements],
++                          "parameter_shape": list(self.watched.shape),
++                          "local_shape": list(self.watched.to_local().shape)}), flush=True)
++        return 0
++
++    def _forward(self, data, indices):
++        samples = [torch.as_tensor(data["tokens"][i], device=self.device, dtype=torch.long) for i in indices]
++        lengths = [len(x) for x in samples]
++        tokens = torch.nn.utils.rnn.pad_sequence(samples, batch_first=True, padding_value=0)
++        attention_mask = torch.arange(tokens.shape[1], device=self.device)[None, :] < torch.tensor(
++            lengths, device=self.device)[:, None]
++        logits = self.model(input_ids=tokens, attention_mask=attention_mask, use_cache=False).logits
++        return response_log_probs(logits, tokens, lengths, [data["response_lengths"][i] for i in indices],
++                                  temperature=self.args.rollout_temperature)
++
++    def _validate_data(self, data):
++        # Coordinate validation errors before any FSDP collective. A bad rank
++        # must not leave its peers waiting in a forward/backward collective.
++        local = {"error": None, "ids": [], "microbatches": 0}
++        try:
++            schedules = data["micro_batch_indices"]
++            local["microbatches"] = len(schedules)
++            if (not schedules or data["global_batch_sizes"] != [self.args.global_batch_size]
++                    or data["num_microbatches"] != [len(schedules)]):
++                raise ValueError("Exactly one optimizer step per rollout is required")
++            size = len(data["tokens"])
++            if sorted(i for mb in schedules for i in mb) != list(range(size)):
++                raise ValueError("Each local sample must appear exactly once")
++            if any(len(mb) != self.args.micro_batch_size for mb in schedules):
++                raise ValueError("Only complete fixed-size microbatches are supported")
++            fields = ("response_lengths", "rewards", "loss_masks", "rollout_ids", "rollout_mask_sums")
++            if any(len(data[field]) != size for field in fields):
++                raise ValueError("Per-sample field lengths differ")
++            if self.args.use_rollout_logprobs and len(data.get("rollout_log_probs", [])) != size:
++                raise ValueError("Real rollout logprobs are required for every sample")
++            for i, tokens in enumerate(data["tokens"]):
++                tokens = torch.as_tensor(tokens)
++                response = data["response_lengths"][i]
++                mask = torch.as_tensor(data["loss_masks"][i])
++                denom = float(data["rollout_mask_sums"][i])
++                reward = float(data["rewards"][i])
++                if tokens.ndim != 1 or not 0 < response < len(tokens):
++                    raise ValueError("Each response requires a nonempty prompt and response")
++                if (tokens < 0).any() or (tokens >= self.hf_config.vocab_size).any():
++                    raise ValueError("Token IDs are outside model vocabulary")
++                if (mask.shape != (response,) or not torch.isfinite(mask).all()
++                        or (mask < 0).any() or float(mask.sum()) != denom or not math.isfinite(reward)):
++                    raise ValueError("Invalid response mask, reward or segmented denominator")
++                if self.args.use_rollout_logprobs:
++                    previous = torch.as_tensor(data["rollout_log_probs"][i])
++                    if previous.shape != (response,) or not torch.isfinite(previous).all():
++                        raise ValueError("Invalid old response logprobs")
++            local["ids"] = list(data["rollout_ids"])
++        except Exception as error:
++            local["error"] = f"rank {self.data_rank}: {type(error).__name__}: {error}"
++        gathered = [None] * self.data_world_size
++        dist.all_gather_object(gathered, local, group=get_gloo_group())
++        errors = [rank["error"] for rank in gathered if rank["error"]]
++        if errors:
++            raise ValueError("; ".join(errors))
++        ids = [rid for rank in gathered for rid in rank["ids"]]
++        if len(ids) != self.args.global_batch_size or len(set(ids)) != len(ids):
++            raise ValueError("One training sample per distinct rollout is required")
++        if len({rank["microbatches"] for rank in gathered}) != 1:
++            raise ValueError("All ranks must execute the same number of microbatches")
++
++    def train(self, rollout_id, rollout_data_ref, external_data=None):
++        if external_data is not None:
++            raise ValueError("External critic/teacher data is not supported")
++        data = process_rollout_data(rollout_data_ref, self.data_rank, self.data_world_size)
++        self._validate_data(data)
++        schedules = data["micro_batch_indices"]
++        # Slime's default old policy is a snapshot before ANY optimizer update.
++        # Keep it fixed over the whole batch and all accumulation microbatches.
++        self.model.eval()
++        if self.args.use_rollout_logprobs:
++            if not data.get("rollout_log_probs"):
++                raise ValueError("use_rollout_logprobs requires real rollout logprobs")
++            old = data["rollout_log_probs"]
++        else:
++            old = [None] * len(data["tokens"])
++            with torch.no_grad():
++                for indices in schedules:
++                    for index, value in zip(indices, self._forward(data, indices), strict=True):
++                        old[index] = value.detach().cpu()
++        # Qwen first-pass dropout is zero; eval keeps snapshot/current paths
++        # deterministic while retaining autograd and FSDP pre-backward hooks.
++        self.optimizer.zero_grad(set_to_none=True)
++        before = self.watched.to_local().detach().clone()
++        local_loss = torch.zeros((), device=self.device)
++        local_clip = torch.zeros((), device=self.device)
++        for indices in schedules:
++            contribution, clipped = grpo_contribution(
++                self._forward(data, indices), [old[i] for i in indices],
++                [data["rewards"][i] for i in indices], [data["loss_masks"][i] for i in indices],
++                [data["rollout_mask_sums"][i] for i in indices], self.args.eps_clip,
++                self.args.eps_clip_high, getattr(self.args, "eps_clip_c", None))
++            (contribution * backward_scale(self.data_world_size, self.args.global_batch_size)).backward()
++            local_loss += contribution.detach()
++            local_clip += clipped.detach()
++        norm_squared = torch.zeros((), device=self.device)
++        for parameter in self.model.parameters():
++            if parameter.grad is not None:
++                norm_squared += parameter.grad.to_local().detach().float().square().sum()
++        dist.all_reduce(norm_squared)
++        grad_norm = math.sqrt(norm_squared.item())
++        if not math.isfinite(grad_norm) or grad_norm == 0:
++            raise RuntimeError("GRPO gradient is nonfinite or zero")
++        clip = float(getattr(self.args, "clip_grad", 0.0) or 0.0)
++        if clip > 0:
++            coefficient = min(1.0, clip / (grad_norm + 1e-6))
++            for parameter in self.model.parameters():
++                if parameter.grad is not None:
++                    parameter.grad.mul_(coefficient)
++        self.optimizer.step()
++        update = (self.watched.to_local().detach() - before).float().square().sum()
++        dist.all_reduce(update)
++        update_l2 = math.sqrt(update.item())
++        if not math.isfinite(update_l2) or update_l2 == 0:
++            raise RuntimeError("GRPO optimizer did not change the Q projection")
++        metrics = torch.stack([local_loss, local_clip])
++        dist.all_reduce(metrics)
++        metrics /= self.args.global_batch_size
++        self.step += 1
++        result = {"rollout_id": rollout_id, "optimizer_step": self.step, "rank": self.data_rank,
++                  "loss": metrics[0].item(), "clip_fraction": metrics[1].item(),
++                  "global_grad_norm": grad_norm, "q_projection_update_l2": update_l2,
++                  "data_domain": self.data_world_size, "microbatches": len(schedules)}
++        self.step_records.append(result)
++        report_dir = Path(getattr(self.args, "fsdp_report_dir",
++                                  Path(self.args.update_weight_disk_dir).parent / "rank-reports"))
++        report_dir.mkdir(parents=True, exist_ok=True)
++        (report_dir / f"rank{self.data_rank:02d}.json").write_text(json.dumps({
++            "rank": self.data_rank, "data_domain": self.data_world_size,
++            "mesh": list(self.watched.device_mesh.shape),
++            "placements": [str(value) for value in self.watched.placements],
++            "global_shape": list(self.watched.shape), "local_shape": list(self.watched.to_local().shape),
++            "steps": self.step_records}, indent=2) + "\n")
++        print(json.dumps(result), flush=True)
++        return result
++
++    def update_weights(self):
++        from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
++        import fsdp_turbo
++
++        self.model.eval()
++        probe_tokens = torch.tensor([[i % self.hf_config.vocab_size for i in (1, 2, 3, 4)]], device=self.device)
++        with torch.no_grad():
++            logits = self.model(input_ids=probe_tokens, use_cache=False).logits[0, -1, :16].float().cpu().tolist()
++        full_state = get_model_state_dict(self.hf_model, options=StateDictOptions(full_state_dict=True, cpu_offload=True))
++        version = self.weight_version + 1
++        status = [None]
++        if self.data_rank == 0:
++            try:
++                source = Path(fsdp_turbo.__file__).resolve()
++                revision = subprocess.run(["git", "-C", str(source.parent.parent), "rev-parse", "HEAD"],
++                                          capture_output=True, text=True, timeout=10)
++                runtime = {"torch": torch.__version__, "torch_npu": importlib.metadata.version("torch-npu"),
++                           "transformers": importlib.metadata.version("transformers"), "turbo_module": str(source),
++                           "turbo_sha": revision.stdout.strip() if revision.returncode == 0 else None,
++                           "parameter_dtype": "torch.float32", "forward_dtype": "torch.bfloat16",
++                           "reduce_dtype": "torch.float32"}
++                probe = {"input_ids": probe_tokens.cpu().tolist(), "logits": logits, "atol": 0.02, "rtol": 0.02}
++                status[0] = {"result": write_export(self.hf_model, full_state, self.args.update_weight_disk_dir,
++                                                   version, probe, runtime)}
++            except Exception as error:
++                status[0] = {"error": f"{type(error).__name__}: {error}"}
++        dist.broadcast_object_list(status, src=0, group=get_gloo_group())
++        del full_state
++        if "error" in status[0]:
++            raise RuntimeError(status[0]["error"])
++        self.weight_version = version
++        return status[0]["result"]
++
++    def save_model(self, rollout_id, force_sync=False):
++        raise NotImplementedError("DCP optimizer/RNG checkpoint is not implemented; HF export uses update_weights")
++
++    def sleep(self, tags=None):
++        raise NotImplementedError("Training offload is not supported by the minimal FSDP2 backend")
++
++    def wake_up(self, tags=None):
++        raise NotImplementedError("Training offload is not supported by the minimal FSDP2 backend")
+diff --git a/slime/backends/fsdp2_utils/export.py b/slime/backends/fsdp2_utils/export.py
+new file mode 100644
+index 00000000..fccdb80d
+--- /dev/null
++++ b/slime/backends/fsdp2_utils/export.py
+@@ -0,0 +1,104 @@
++"""Versioned, atomic full-CPU HF exports and an independent cold-load receiver."""
++
++import hashlib
++import json
++import os
++from pathlib import Path
++import tempfile
++
++import torch
++
++
++def _file_sha256(path):
++    digest = hashlib.sha256()
++    with open(path, "rb") as stream:
++        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
++            digest.update(block)
++    return digest.hexdigest()
++
++
++def write_export(model, state_dict, root, weight_version, probe, runtime):
++    """Rank-zero writer. Caller must gather every FSDP shard before this call."""
++    root = Path(root).resolve()
++    root.mkdir(parents=True, exist_ok=True)
++    destination = root / f"weight_v{weight_version:06d}"
++    if destination.exists():
++        raise FileExistsError(f"Refusing to replace published weights: {destination}")
++    for value in state_dict.values():
++        if value.device.type != "cpu" or not torch.isfinite(value).all():
++            raise ValueError("Export requires complete finite CPU tensors")
++        if value.is_floating_point() and value.dtype != torch.float32:
++            raise ValueError("The minimal export protocol requires FP32 master parameters")
++    inventory = {name: {"shape": list(value.shape), "dtype": str(value.dtype)}
++                 for name, value in state_dict.items()}
++    if not inventory:
++        raise ValueError("Full model state must not be empty")
++    # Temporary directory is on the destination filesystem: rename is atomic.
++    with tempfile.TemporaryDirectory(prefix=".weight-writing-", dir=root) as temporary:
++        staging = Path(temporary) / "model"
++        # Transformers 5 may consume entries from the provided state mapping.
++        # Preserve the caller's mapping and the pre-save inventory.
++        model.save_pretrained(staging, state_dict=dict(state_dict), safe_serialization=True, max_shard_size="2GB")
++        files = {p.name: {"sha256": _file_sha256(p), "bytes": p.stat().st_size}
++                 for p in staging.iterdir() if p.is_file()}
++        manifest = {"schema_version": 1, "weight_version": weight_version, "format": "hf-full-cpu",
++                    "runtime": runtime, "probe": probe, "files": files,
++                    "state": inventory}
++        (staging / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
++        (staging / "COMPLETE").write_text(str(weight_version) + "\n")
++        os.rename(staging, destination)
++    return {"weight_version": weight_version, "model_path": str(destination),
++            "manifest_path": str(destination / "manifest.json")}
++
++
++def verify_exported_model(model_path, manifest_path, weight_version):
++    """Load only the published files, without consulting the training model.
++
++    This intentionally constructs a fresh unsharded CPU HF model. It is an
++    offline verification receiver, not a serving engine or DCP resume path.
++    """
++    from transformers import AutoModelForCausalLM
++
++    root = Path(model_path).resolve()
++    if Path(manifest_path).resolve() != root / "manifest.json":
++        raise ValueError("Manifest must belong to the published model directory")
++    manifest = json.loads((root / "manifest.json").read_text())
++    if (manifest["schema_version"] != 1 or manifest["weight_version"] != int(weight_version)
++            or (root / "COMPLETE").read_text().strip() != str(weight_version)):
++        raise ValueError("Incomplete export or weight-version mismatch")
++    for name, expected in manifest["files"].items():
++        if Path(name).name != name:
++            raise ValueError("Export file names must be local basenames")
++        path = root / name
++        if path.stat().st_size != expected["bytes"] or _file_sha256(path) != expected["sha256"]:
++            raise ValueError(f"Export checksum mismatch: {name}")
++    model, loading = AutoModelForCausalLM.from_pretrained(
++        root, local_files_only=True, torch_dtype=torch.float32, attn_implementation="eager", output_loading_info=True)
++    if any(loading.get(key) for key in ("missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs")):
++        raise ValueError(f"Cold load did not consume a complete matching HF checkpoint: {loading}")
++    model = model.cpu().eval()
++    state = model.state_dict()
++    if set(state) != set(manifest["state"]):
++        raise ValueError("Cold-loaded state keys differ from the full export")
++    for name, tensor in state.items():
++        expected = manifest["state"][name]
++        if list(tensor.shape) != expected["shape"] or str(tensor.dtype) != expected["dtype"]:
++            raise ValueError(f"Cold-loaded tensor metadata differs: {name}")
++        if not torch.isfinite(tensor).all():
++            raise ValueError(f"Cold-loaded tensor is nonfinite: {name}")
++    probe = manifest["probe"]
++    tokens = torch.tensor(probe["input_ids"], dtype=torch.long)
++    with torch.no_grad():
++        actual = model(input_ids=tokens, use_cache=False).logits[0, -1, :len(probe["logits"])].float()
++    expected = torch.tensor(probe["logits"], dtype=torch.float32)
++    if not torch.allclose(actual, expected, atol=probe["atol"], rtol=probe["rtol"]):
++        raise ValueError(f"Cold-load probe mismatch: max_abs={(actual - expected).abs().max().item()}")
++    result = {"weight_version": int(weight_version), "model_path": str(root), "verified": True,
++              "tensor_count": len(state), "file_count": len(manifest["files"]),
++              "probe_max_abs": (actual - expected).abs().max().item(),
++              "receiver_dtype": "torch.float32", "receiver_device": "cpu"}
++    # This receipt is outside manifest.files and does not alter published weights.
++    temporary = root / f".receiver-receipt-{os.getpid()}.json"
++    temporary.write_text(json.dumps(result, indent=2) + "\n")
++    os.replace(temporary, root / "receiver-receipt.json")
++    return result
+diff --git a/slime/backends/fsdp2_utils/loss.py b/slime/backends/fsdp2_utils/loss.py
+new file mode 100644
+index 00000000..ae813f79
+--- /dev/null
++++ b/slime/backends/fsdp2_utils/loss.py
+@@ -0,0 +1,77 @@
++"""Response-only PPO/GRPO objective with Slime's global rollout reduction."""
++
++import torch
++
++from slime.utils.ppo_utils import compute_policy_loss
++
++# Use the exact Slime mathematical function eagerly: the backend must not
++# silently select a CUDA Inductor compiler when running on Ascend.
++_policy_loss = getattr(compute_policy_loss, "__wrapped__", compute_policy_loss)
++
++
++def response_log_probs(logits, tokens, total_lengths, response_lengths, temperature=1.0):
++    """Predict response token t from logits[t-1], excluding prompt and padding."""
++    if temperature <= 0 or logits.ndim != 3 or tokens.ndim != 2:
++        raise ValueError("Expected positive temperature, [B,T,V] logits and [B,T] tokens")
++    if logits.shape[:2] != tokens.shape or len(total_lengths) != len(tokens):
++        raise ValueError("Token/logit batch dimensions do not match")
++    result = []
++    for row, (total, response) in enumerate(zip(total_lengths, response_lengths, strict=True)):
++        if not 0 < response < total <= tokens.shape[1]:
++            raise ValueError("Every sample requires at least one prompt and one response token")
++        start = total - response
++        selected = logits[row, start - 1 : total - 1].float() / temperature
++        targets = tokens[row, start:total].unsqueeze(-1)
++        result.append(selected.log_softmax(-1).gather(-1, targets).squeeze(-1))
++    return result
++
++
++def grpo_contribution(log_probs, old_log_probs, rewards, loss_masks, rollout_mask_sums,
++                      eps_clip=0.2, eps_clip_high=0.2, eps_clip_c=None):
++    """Sum local contributions, each divided by its WHOLE rollout mask total.
++
++    Rewards have already been group-normalized by BatchBuilder, before DP
++    partitioning. Never normalize them again on a rank or microbatch.
++    """
++    size = len(log_probs)
++    if not size or any(len(x) != size for x in (old_log_probs, rewards, loss_masks, rollout_mask_sums)):
++        raise ValueError("Per-sample field counts differ or the microbatch is empty")
++    old, advantage, masks, denoms = [], [], [], []
++    for new, previous, reward, mask, denom in zip(
++        log_probs, old_log_probs, rewards, loss_masks, rollout_mask_sums, strict=True
++    ):
++        previous = torch.as_tensor(previous, device=new.device, dtype=torch.float32).detach()
++        mask = torch.as_tensor(mask, device=new.device, dtype=torch.float32)
++        denom = torch.as_tensor(denom, device=new.device, dtype=torch.float32)
++        reward = torch.as_tensor(reward, device=new.device, dtype=torch.float32).detach()
++        if previous.shape != new.shape or mask.shape != new.shape or reward.numel() != 1 or denom.numel() != 1:
++            raise ValueError("Old logprobs, response mask, reward or denominator shape differs")
++        if not all(torch.isfinite(x).all().item() for x in (new, previous, mask, denom, reward)):
++            raise ValueError("Nonfinite GRPO input")
++        if (mask < 0).any().item() or denom.item() < mask.sum().item():
++            raise ValueError("Mask must be nonnegative and denominator cover the whole rollout")
++        old.append(previous)
++        advantage.append(reward.expand_as(new))
++        masks.append(mask)
++        denoms.append(denom.clamp_min(1))
++    current = torch.cat(log_probs)
++    losses, clipped = _policy_loss(torch.cat(old) - current, torch.cat(advantage),
++                                    eps_clip, eps_clip_high, eps_clip_c)
++    contribution = current.sum() * 0
++    clip_contribution = current.detach().sum() * 0
++    for loss, clip, mask, denom in zip(losses.split([len(x) for x in log_probs]),
++                                      clipped.split([len(x) for x in log_probs]), masks, denoms, strict=True):
++        contribution = contribution + (loss * mask).sum() / denom
++        clip_contribution = clip_contribution + (clip * mask).sum() / denom
++    return contribution, clip_contribution
++
++
++def backward_scale(data_world_size, global_rollout_count):
++    """FSDP averages gradients: D/N cancels D once across all microbatches.
++
++    Each microbatch contributes its unaveraged rollout sum and is backpropagated
++    directly. There is deliberately no gradient-accumulation-step divisor.
++    """
++    if data_world_size < 1 or global_rollout_count < 1:
++        raise ValueError("Data world size and global rollout count must be positive")
++    return data_world_size / global_rollout_count
+diff --git a/tests/fsdp2/test_fsdp2_export.py b/tests/fsdp2/test_fsdp2_export.py
+new file mode 100644
+index 00000000..219a0e9d
+--- /dev/null
++++ b/tests/fsdp2/test_fsdp2_export.py
+@@ -0,0 +1,39 @@
++import importlib.util
++import json
++from pathlib import Path
++
++import pytest
++import torch
++from transformers import Qwen3Config, Qwen3ForCausalLM
++
++MODULE = Path(__file__).resolve().parents[2] / "slime/backends/fsdp2_utils/export.py"
++spec = importlib.util.spec_from_file_location("fsdp2_test_export", MODULE)
++export = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(export)
++
++
++def test_atomic_hf_export_coldload_and_tamper_detection(tmp_path):
++    torch.manual_seed(8)
++    config = Qwen3Config(vocab_size=32, hidden_size=16, intermediate_size=24,
++                         num_hidden_layers=1, num_attention_heads=2, num_key_value_heads=1, head_dim=8)
++    config._attn_implementation = "eager"
++    model = Qwen3ForCausalLM(config).float().eval()
++    tokens = torch.tensor([[1, 2, 3, 4]])
++    with torch.no_grad():
++        logits = model(input_ids=tokens).logits[0, -1, :16].tolist()
++    probe = {"input_ids": tokens.tolist(), "logits": logits, "atol": 1e-6, "rtol": 1e-6}
++    published = export.write_export(model, model.state_dict(), tmp_path, 0, probe, {"fixture": "cpu"})
++    result = export.verify_exported_model(**published)
++    assert result["verified"] and result["weight_version"] == 0 and result["probe_max_abs"] < 1e-6
++    root = Path(published["model_path"])
++    assert json.loads((root / "receiver-receipt.json").read_text())["tensor_count"] == len(model.state_dict())
++    assert not list(tmp_path.glob(".weight-writing-*"))
++    with pytest.raises(FileExistsError):
++        export.write_export(model, model.state_dict(), tmp_path, 0, probe, {})
++    with pytest.raises(ValueError, match="version"):
++        export.verify_exported_model(published["model_path"], published["manifest_path"], 1)
++    tensor_file = next(root.glob("*.safetensors"))
++    with tensor_file.open("ab") as stream:
++        stream.write(b"corrupt")
++    with pytest.raises(ValueError, match="checksum"):
++        export.verify_exported_model(**published)
+diff --git a/tests/fsdp2/test_fsdp2_loss.py b/tests/fsdp2/test_fsdp2_loss.py
+new file mode 100644
+index 00000000..6647c1aa
+--- /dev/null
++++ b/tests/fsdp2/test_fsdp2_loss.py
+@@ -0,0 +1,96 @@
++"""Independent tiny-tensor numerical oracles; no NPU or Ray actor required."""
++
++import importlib.util
++from pathlib import Path
++import sys
++
++import pytest
++import torch
++
++ROOT = Path(__file__).resolve().parents[2]
++sys.path.insert(0, str(ROOT))
++MODULE = ROOT / "slime/backends/fsdp2_utils/loss.py"
++spec = importlib.util.spec_from_file_location("fsdp2_test_loss", MODULE)
++loss = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(loss)
++
++
++def test_response_shift_excludes_prompt_padding_and_keeps_gradient():
++    torch.manual_seed(9)
++    logits = torch.randn(2, 6, 7, requires_grad=True)
++    tokens = torch.tensor([[1, 2, 3, 4, 5, 6], [6, 5, 4, 3, 0, 0]])
++    values = loss.response_log_probs(logits, tokens, [6, 4], [3, 2], temperature=0.7)
++    oracle = [torch.stack([logits[0, t - 1].float().div(0.7).log_softmax(0)[tokens[0, t]]
++                           for t in (3, 4, 5)]),
++              torch.stack([logits[1, t - 1].float().div(0.7).log_softmax(0)[tokens[1, t]]
++                           for t in (2, 3)])]
++    torch.testing.assert_close(values, oracle)
++    sum(x.sum() for x in values).backward()
++    assert logits.grad[0, :2].count_nonzero() == 0
++    assert logits.grad[1, 3:].count_nonzero() == 0
++    assert logits.grad[0, 2:5].count_nonzero() > 0
++
++
++def _oracle(current, previous, rewards, masks, denoms):
++    answer = current[0].sum() * 0
++    for x, old, advantage, mask, denom in zip(current, previous, rewards, masks, denoms, strict=True):
++        ratio = (x - old).exp()
++        token_loss = -torch.minimum(ratio * advantage, ratio.clamp(0.8, 1.2) * advantage)
++        answer = answer + (token_loss * mask).sum() / max(denom, 1)
++    return answer
++
++
++def test_policy_clip_and_response_mask_match_independent_formula_and_gradient():
++    current = [torch.tensor([-0.2, -1.1, -0.3], requires_grad=True),
++               torch.tensor([-1.4, -0.5], requires_grad=True)]
++    old = [torch.tensor([-0.7, -0.4, -0.3]), torch.tensor([-0.3, -0.7])]
++    masks = [torch.tensor([1., 0., 1.]), torch.tensor([1., 1.])]
++    rewards = [1.3, -0.7]
++    actual, _ = loss.grpo_contribution(current, old, rewards, masks, [2, 2])
++    expected = _oracle(current, old, rewards, masks, [2, 2])
++    torch.testing.assert_close(actual, expected)
++    actual_grads = torch.autograd.grad(actual, current, retain_graph=True)
++    expected_grads = torch.autograd.grad(expected, current)
++    torch.testing.assert_close(actual_grads, expected_grads)
++    assert actual_grads[0][1] == 0
++
++
++def test_eight_rank_avg_and_accumulation_match_single_global_rollout_mean():
++    # Unequal masks and one rollout split across microbatches/ranks expose both
++    # an erroneous token mean and an extra /num_microbatches factor.
++    parameter = torch.tensor(0.1, requires_grad=True)
++    features = [torch.tensor([i / 9, -0.3, 0.7]) for i in range(16)]
++    old = [torch.full((3,), -1.0) for _ in features]
++    rewards = [(-1.) ** i * (i + 1) / 8 for i in range(16)]
++    masks = [torch.tensor([1., i % 2, 1.]) for i in range(16)]
++    # Segments 0 and 8 are one rollout, whose denominator must be the global
++    # sum (4); all other samples correspond to distinct rollouts.
++    denoms = [float(m.sum()) for m in masks]
++    denoms[0] = denoms[8] = float(masks[0].sum() + masks[8].sum())
++    count = 15
++    current = [-1 + parameter * feature for feature in features]
++    global_loss = _oracle(current, old, rewards, masks, denoms) / count
++    global_gradient = torch.autograd.grad(global_loss, parameter)[0]
++    rank_gradients = []
++    for rank in range(8):
++        local = torch.tensor(0.1, requires_grad=True)
++        for i in (rank, rank + 8):
++            contribution, _ = loss.grpo_contribution([-1 + local * features[i]], [old[i]],
++                                                      [rewards[i]], [masks[i]], [denoms[i]])
++            (contribution * loss.backward_scale(8, count)).backward()
++        rank_gradients.append(local.grad)
++    torch.testing.assert_close(torch.stack(rank_gradients).mean(), global_gradient)
++
++
++def test_fully_masked_response_is_zero_with_zero_gradient():
++    current = torch.tensor([-1., -2.], requires_grad=True)
++    result, _ = loss.grpo_contribution([current], [current.detach()], [2.], [torch.zeros(2)], [0.])
++    result.backward()
++    assert result.item() == 0 and current.grad.count_nonzero() == 0
++
++
++def test_reject_bad_denominator_and_shapes():
++    with pytest.raises(ValueError, match="denominator"):
++        loss.grpo_contribution([torch.ones(2)], [torch.ones(2)], [1.], [torch.ones(2)], [1.])
++    with pytest.raises(ValueError, match="shape"):
++        loss.grpo_contribution([torch.ones(2)], [torch.ones(1)], [1.], [torch.ones(2)], [2.])
+-- 
+2.39.5 (Apple Git-154)
+
