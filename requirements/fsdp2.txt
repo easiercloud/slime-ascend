@@ -1,0 +1,8 @@
+# Validated with image Python 3.12.9, torch 2.10.0, torch_npu 2.10.0.post7, CANN 9.2.
+# FSDPTurbo revision: 0383285e5a7e75d269624354fcc958bd6dcda739
+# Install inside a --system-site-packages venv; do not upgrade serving dependencies.
+transformers==5.16.0
+tokenizers==0.23.3
+fla-core==0.6.0
+flash-linear-attention==0.6.0
+torchao==0.18.0

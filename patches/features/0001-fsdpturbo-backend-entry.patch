@@ -1,0 +1,520 @@
+From f495720cdd3fe029d5a96e43aec999a6f9ff4d51 Mon Sep 17 00:00:00 2001
+From: WBiXin <wangbingxuan@huawei.com>
+Date: Sat, 21 Nov 2026 19:01:03 +0800
+Subject: [PATCH] Add FSDPTurbo backend entry and isolated actor initialization
+
+---
+ docs/en/fsdp-init.md                   | 49 +++++++++++++
+ slime/backends/fsdp_utils/__init__.py  |  1 +
+ slime/backends/fsdp_utils/actor.py     | 97 ++++++++++++++++++++++++++
+ slime/backends/fsdp_utils/arguments.py | 60 ++++++++++++++++
+ slime/backends/fsdp_utils/preflight.py | 65 +++++++++++++++++
+ slime/ray/actor_group.py               | 12 +++-
+ slime/utils/arguments.py               | 32 +++++++--
+ tests/test_fsdp_entry.py               | 61 ++++++++++++++++
+ train.py                               |  6 ++
+ 9 files changed, 377 insertions(+), 6 deletions(-)
+ create mode 100644 docs/en/fsdp-init.md
+ create mode 100644 slime/backends/fsdp_utils/__init__.py
+ create mode 100644 slime/backends/fsdp_utils/actor.py
+ create mode 100644 slime/backends/fsdp_utils/arguments.py
+ create mode 100644 slime/backends/fsdp_utils/preflight.py
+ create mode 100644 tests/test_fsdp_entry.py
+
+diff --git a/docs/en/fsdp-init.md b/docs/en/fsdp-init.md
+new file mode 100644
+index 00000000..f95c1987
+--- /dev/null
++++ b/docs/en/fsdp-init.md
+@@ -0,0 +1,49 @@
++# FSDPTurbo backend: initialization milestone
++
++This experimental entry initializes Slime training actors using FSDPTurbo's
++Python environment. It does not load a model, train GRPO, generate responses,
++publish weights, or save checkpoints yet. Those operations fail explicitly.
++
++Run the driver with the original serving Python. Pass an absolute training
++Python path using `--fsdp-python-executable`; only training Ray actors receive
++that interpreter. The same checkout and training environment must be visible
++to the actors. This milestone supports one node only.
++
++Example inside an already configured Ray/NPU environment:
++
++```bash
++python train.py \
++  --train-backend fsdp --fsdp-provider fsdpturbo --fsdp-init-only \
++  --fsdp-python-executable /workspace/slime-fsdp2/envs/fsdp2/bin/python \
++  --fsdp-init-report /tmp/fsdp-init-result.json \
++  --actor-num-nodes 1 --actor-num-gpus-per-node 2 --num-gpus-per-node 4 \
++  --rollout-batch-size 2 --distributed-backend hccl
++```
++
++The check uses Slime's placement groups and training actor factory. Two training
++devices run FP32/BF16 all-reduce, all-gather and reduce-scatter with exact expected
++results. A CPU Ray worker imports SGLang ServerArgs with the driver's interpreter;
++this is an environment check, not a running SGLang engine or generation test.
++Training groups are shut down, actors killed, and placements released afterward.
++
++The FSDP parser and actor module import do not require Megatron, MegatronAdaptor,
++TransformerEngine or SGLang. The provider itself has a different boundary:
++FSDPTurbo `fsdp_turbo/ops/__init__.py` attempts CUDA registration even on NPU,
++and its CUDA permute/RMSNorm modules optionally import TransformerEngine.
++The runtime report records those optional imports separately. It does not claim
++that the complete FSDPTurbo process is free of TransformerEngine imports.
++Megatron, MegatronAdaptor and SGLang must remain absent from training actors.
++
++Validated environment: original Python uses Transformers 5.12.1; training venv
++uses Transformers 5.16.0. Torch/TorchNPU remain the image-provided 2.10 versions.
++TorchAO native extensions are unavailable in this environment; quantized training
++is outside this milestone. Native extension compilation may slow first startup.
++
++Rejected configurations include offload, colocation, critic/PPO, reference/KL,
++OPD, fault tolerance, checkpoint load/save, routing replay and non-object-store
++rollout transport. The GRPO option here selects the intended future algorithm;
++no GRPO loss is computed during initialization.
++
++The existing Megatron entry remains the default. Its checkpoint fallback is
++backend-specific; FSDP initialization starts with an empty restore plan. Tests
++cover strict CLI validation and lazy imports in `tests/test_fsdp_entry.py`.
+diff --git a/slime/backends/fsdp_utils/__init__.py b/slime/backends/fsdp_utils/__init__.py
+new file mode 100644
+index 00000000..ffd87980
+--- /dev/null
++++ b/slime/backends/fsdp_utils/__init__.py
+@@ -0,0 +1 @@
++"""FSDPTurbo-backed training support."""
+diff --git a/slime/backends/fsdp_utils/actor.py b/slime/backends/fsdp_utils/actor.py
+new file mode 100644
+index 00000000..a62d5d32
+--- /dev/null
++++ b/slime/backends/fsdp_utils/actor.py
+@@ -0,0 +1,97 @@
++"""FSDP actor lifecycle; model execution is added in subsequent milestones."""
++
++import importlib.metadata
++import os
++import sys
++
++import torch
++import torch.distributed as dist
++
++from slime.ray.train_actor import TrainRayActor
++from slime.utils import accelerator
++from slime.utils.distributed_utils import set_gloo_group
++
++
++class FSDPTrainRayActor(TrainRayActor):
++    """Own one training rank and its communication groups."""
++
++    def init(self, args, role, with_ref=False, with_opd_teacher=False):
++        from slime.backends.fsdp_utils.arguments import validate_fsdp_args
++
++        validate_fsdp_args(args)
++        if role != "actor" or with_ref or with_opd_teacher:
++            raise ValueError("FSDP currently supports only an actor without reference or teacher models")
++        # Establish rendezvous before provider imports can trigger slow JIT builds.
++        super().init(args, role, with_ref, with_opd_teacher)
++        self.imports_before_provider = sorted(
++            name for name in sys.modules
++            if name.split(".")[0] in {"megatron", "megatron_adaptor", "transformer_engine", "sglang"}
++        )
++        from fsdp_turbo.fsdp_turbo import FSDPTurbo
++        from fsdp_turbo.fsdp_turbo_config import FSDPTurboConfig
++
++        self.provider = FSDPTurbo.__name__
++        self.provider_config = FSDPTurboConfig.__name__
++        self.train_parallel_config = {
++            "dp_size": self._world_size, "cp_size": 1, "vpp_size": 1,
++            "microbatch_group_size_per_vp_stage": 1,
++        }
++        return args.start_rollout_id
++
++    def check_runtime(self):
++        """Collectively check both floating point formats and report isolation."""
++        device = torch.device(accelerator.device_type(), accelerator.current_device())
++        checks = []
++        expected_sum = self._world_size * (self._world_size + 1) // 2
++        for dtype in (torch.float32, torch.bfloat16):
++            local = torch.full((8,), self._rank + 1, device=device, dtype=dtype)
++            reduced = local.clone()
++            dist.all_reduce(reduced)
++            torch.testing.assert_close(reduced, torch.full_like(reduced, expected_sum), rtol=0, atol=0)
++            gathered = torch.empty(8 * self._world_size, device=device, dtype=dtype)
++            dist.all_gather_into_tensor(gathered, local)
++            expected = torch.arange(1, self._world_size + 1, device=device, dtype=dtype).repeat_interleave(8)
++            torch.testing.assert_close(gathered, expected, rtol=0, atol=0)
++            scattered = torch.empty_like(local)
++            dist.reduce_scatter_tensor(scattered, local.repeat(self._world_size))
++            torch.testing.assert_close(scattered, torch.full_like(scattered, expected_sum), rtol=0, atol=0)
++            checks.append({"dtype": str(dtype), "all_reduce": True, "all_gather": True, "reduce_scatter": True})
++        forbidden = sorted(name for name in sys.modules
++                           if name.split(".")[0] in {"megatron", "megatron_adaptor", "sglang"})
++        # FSDPTurbo registers optional CUDA ops even on NPU. Its upstream
++        # imports can load TransformerEngine; distinguish these from Slime's
++        # trainer dependencies instead of hiding modules or patching upstream.
++        optional_provider_imports = sorted({name.split(".")[0] for name in sys.modules
++                                            if name.startswith("transformer_engine")})
++        return {
++            "rank": self._rank, "world_size": self._world_size, "device": str(device),
++            "pid": os.getpid(), "python": sys.executable,
++            "transformers": importlib.metadata.version("transformers"),
++            "provider": self.provider, "provider_config": self.provider_config,
++            "train_parallel_config": self.train_parallel_config,
++            "forbidden_imports": forbidden, "checks": checks,
++            "imports_before_provider": self.imports_before_provider,
++            "optional_provider_imports": optional_provider_imports,
++        }
++
++    def shutdown(self):
++        """Destroy this actor's process groups before Ray releases its resources."""
++        if dist.is_initialized():
++            dist.destroy_process_group()
++        set_gloo_group(None)
++        return {"rank": self._rank, "distributed_initialized": dist.is_initialized()}
++
++    def train(self, rollout_id, rollout_data_ref, external_data=None):
++        raise NotImplementedError("FSDP GRPO training is not implemented yet")
++
++    def save_model(self, rollout_id, force_sync=False):
++        raise NotImplementedError("FSDP checkpoint saving is not implemented yet")
++
++    def update_weights(self):
++        raise NotImplementedError("FSDP weight publication is not implemented yet")
++
++    def sleep(self, tags=None):
++        raise NotImplementedError("FSDP offload is not supported")
++
++    def wake_up(self, tags=None):
++        raise NotImplementedError("FSDP offload is not supported")
+diff --git a/slime/backends/fsdp_utils/arguments.py b/slime/backends/fsdp_utils/arguments.py
+new file mode 100644
+index 00000000..8d62d18d
+--- /dev/null
++++ b/slime/backends/fsdp_utils/arguments.py
+@@ -0,0 +1,60 @@
++"""Parse FSDP configuration without importing the Megatron stack."""
++
++import argparse
++import os
++from pathlib import Path
++
++
++def validate_fsdp_args(args):
++    """Reject features that have not yet been integrated with this backend."""
++    if not args.fsdp_init_only:
++        raise ValueError("FSDP currently supports --fsdp-init-only; model training is not implemented yet")
++    if args.fsdp_init_report is None:
++        raise ValueError("--fsdp-init-only requires --fsdp-init-report")
++    executable = Path(args.fsdp_python_executable)
++    if not executable.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK):
++        raise ValueError("--fsdp-python-executable must name an absolute, executable Python path")
++    if args.actor_num_nodes != 1 or args.actor_num_gpus_per_node < 1:
++        raise ValueError("FSDP initialization currently requires one node and at least one training device")
++    if args.num_gpus_per_node < args.actor_num_gpus_per_node:
++        raise ValueError("--num-gpus-per-node must cover the training devices")
++    if args.distributed_timeout_minutes <= 0:
++        raise ValueError("--distributed-timeout-minutes must be positive")
++    if args.advantage_estimator != "grpo":
++        raise ValueError("FSDP currently supports only --advantage-estimator grpo")
++    for name in (
++        "colocate", "offload", "offload_train", "offload_rollout", "release_train",
++        "use_opd", "use_kl_loss", "kl_coef", "kl_loss_coef", "ref_load", "megatron_config_path",
++        "use_routing_replay", "use_rollout_routing_replay", "enable_mtp_training", "use_fault_tolerance",
++        "debug_rollout_only", "load", "save", "save_hf", "custom_config_path", "load_debug_rollout_data",
++    ):
++        if getattr(args, name, None):
++            raise ValueError(f"--{name.replace('_', '-')} is not supported by the FSDP initialization stage")
++    if args.rollout_data_transport != "object-store":
++        raise ValueError("FSDP currently requires --rollout-data-transport object-store")
++    if args.update_weight_mode != "full":
++        raise ValueError("FSDP currently supports only full weight updates")
++
++
++def parse_fsdp_args(extra_args_provider):
++    """Build the shared Slime arguments and explicitly owned FSDP options."""
++    from slime.utils.arguments import slime_validate_args
++
++    parser = extra_args_provider(argparse.ArgumentParser(allow_abbrev=False))
++    parser.add_argument("--train-backend", choices=["fsdp"], default="fsdp")
++    parser.add_argument("--fsdp-provider", choices=["fsdpturbo"], default="fsdpturbo")
++    parser.add_argument("--fsdp-python-executable", required=True)
++    parser.add_argument("--fsdp-init-only", action="store_true")
++    parser.add_argument("--fsdp-init-report", type=Path)
++    parser.add_argument("--debug-train-only", action="store_true")
++    parser.add_argument("--debug-rollout-only", action="store_true")
++    parser.add_argument("--load-debug-rollout-data")
++    parser.set_defaults(num_rollout=0, rollout_batch_size=2, n_samples_per_prompt=4,
++                        global_batch_size=8, advantage_estimator="grpo", kl_loss_coef=0.0)
++    args = parser.parse_args()
++    validate_fsdp_args(args)
++    # The initialization check owns no rollout engines or checkpoint state.
++    args.debug_train_only = True
++    args, restore_plan = slime_validate_args(args)
++    validate_fsdp_args(args)
++    return args, restore_plan
+diff --git a/slime/backends/fsdp_utils/preflight.py b/slime/backends/fsdp_utils/preflight.py
+new file mode 100644
+index 00000000..5cf312c9
+--- /dev/null
++++ b/slime/backends/fsdp_utils/preflight.py
+@@ -0,0 +1,65 @@
++"""Exercise the normal Slime placement and actor factory without loading weights."""
++
++import importlib.metadata
++import json
++import sys
++
++import ray
++from ray.util.placement_group import remove_placement_group
++
++from slime.ray.placement_group import create_placement_groups
++
++
++@ray.remote(num_cpus=1)
++class ServingEnvironmentProbe:
++    """Verify that a default Ray worker keeps the serving interpreter."""
++
++    def inspect(self):
++        from sglang.srt.server_args import ServerArgs
++
++        return {"python": sys.executable, "transformers": importlib.metadata.version("transformers"),
++                "server_args": ServerArgs.__name__}
++
++
++def run_initialization_check(args):
++    """Initialize real training actors, check environment isolation, then release."""
++    from slime.ray.placement_group import allocate_train_group
++
++    placements = None
++    group = None
++    serving = None
++    try:
++        placements = create_placement_groups(args)
++        group = allocate_train_group(args, args.actor_num_nodes, args.actor_num_gpus_per_node,
++                                     placements["actor"])
++        start_ids = group.create()
++        ranks = ray.get([actor.check_runtime.remote() for actor in group._actor_handlers], timeout=120)
++        serving = ServingEnvironmentProbe.remote()
++        serving_state = ray.get(serving.inspect.remote(), timeout=120)
++        assert all(item["python"] == args.fsdp_python_executable for item in ranks)
++        assert all(not item["forbidden_imports"] for item in ranks), ranks
++        assert all(not item["imports_before_provider"] for item in ranks), ranks
++        assert len({item["device"] for item in ranks}) == len(ranks)
++        assert serving_state["python"] == sys.executable
++        assert start_ids == [args.start_rollout_id] * len(ranks)
++        shutdown = ray.get([actor.shutdown.remote() for actor in group._actor_handlers], timeout=60)
++        assert all(not item["distributed_initialized"] for item in shutdown)
++        result = {"passed": True, "scope": "actor initialization only; no model loaded or generation run",
++                  "ranks": ranks, "serving_environment": serving_state, "shutdown": shutdown}
++        args.fsdp_init_report.parent.mkdir(parents=True, exist_ok=True)
++        args.fsdp_init_report.write_text(json.dumps(result, indent=2) + "\n")
++        print("FSDP_ACTOR_INITIALIZATION_PASSED", json.dumps(result), flush=True)
++    finally:
++        if group is not None:
++            group.release()
++        if serving is not None:
++            ray.kill(serving, no_restart=True)
++        if placements is not None:
++            removed = set()
++            for value in placements.values():
++                if value is None:
++                    continue
++                placement = value[0]
++                if placement is not None and placement.id not in removed:
++                    remove_placement_group(placement)
++                    removed.add(placement.id)
+diff --git a/slime/ray/actor_group.py b/slime/ray/actor_group.py
+index 2d1c8777..61e6caf3 100644
+--- a/slime/ray/actor_group.py
++++ b/slime/ray/actor_group.py
+@@ -1,5 +1,6 @@
+ import copy
+ import os
++import shlex
+ import shutil
+ import time
+ from pathlib import Path
+@@ -104,9 +105,14 @@ class RayTrainGroup:
+             env_vars["ENABLE_ROUTING_REPLAY"] = "1"
+ 
+         if self._actor_cls is None:
+-            from slime.backends.megatron_utils.actor import MegatronTrainRayActor
++            if getattr(self.args, "train_backend", "megatron") == "fsdp":
++                from slime.backends.fsdp_utils.actor import FSDPTrainRayActor
+ 
+-            actor_impl = MegatronTrainRayActor
++                actor_impl = FSDPTrainRayActor
++            else:
++                from slime.backends.megatron_utils.actor import MegatronTrainRayActor
++
++                actor_impl = MegatronTrainRayActor
+         else:
+             actor_impl = self._actor_cls
+ 
+@@ -114,6 +120,8 @@ class RayTrainGroup:
+             **accelerator.ray_remote_options(1),
+             "runtime_env": {"env_vars": add_default_ray_env_vars(env_vars)},
+         }
++        if getattr(self.args, "train_backend", "megatron") == "fsdp":
++            actor_options["runtime_env"]["py_executable"] = shlex.quote(self.args.fsdp_python_executable)
+         if getattr(self.args, "rollout_data_transport", "object-store") == "nixl":
+             actor_options["enable_tensor_transport"] = True
+         TrainRayActor = ray.remote(**actor_options)(actor_impl)
+diff --git a/slime/utils/arguments.py b/slime/utils/arguments.py
+index 683f925a..5c1e09d7 100644
+--- a/slime/utils/arguments.py
++++ b/slime/utils/arguments.py
+@@ -8,8 +8,6 @@ from typing import Any
+ 
+ import yaml
+ 
+-from slime.backends.sglang_utils.arguments import sglang_parse_args
+-from slime.backends.sglang_utils.arguments import validate_args as sglang_validate_args
+ from slime.backends.sglang_utils.external import apply_external_engine_info_to_args
+ from slime.observability.logging_utils import configure_logger
+ from slime.utils.eval_config import EvalDatasetConfig, build_eval_dataset_configs, ensure_dataset_list
+@@ -1721,7 +1719,7 @@ def _pre_parse_mode():
+     the final ``args`` after Phase 2 parsing.
+     """
+     temp_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+-    temp_parser.add_argument("--train-backend", type=str, choices=["megatron"], default="megatron")
++    temp_parser.add_argument("--train-backend", type=str, choices=["megatron", "fsdp"], default="megatron")
+     temp_parser.add_argument("--debug-rollout-only", action="store_true", default=False)
+     temp_parser.add_argument("--debug-train-only", action="store_true", default=False)
+     temp_parser.add_argument("--load-debug-rollout-data", type=str, default=None)
+@@ -1741,6 +1739,15 @@ def parse_args(add_custom_arguments=None, *, return_restore_plan=False):
+     add_slime_arguments = get_slime_extra_args_provider(add_custom_arguments)
+ 
+     pre = _pre_parse_mode()
++    if pre.train_backend == "fsdp":
++        from slime.backends.fsdp_utils.arguments import parse_fsdp_args
++
++        args, restore_plan = parse_fsdp_args(add_slime_arguments)
++        return (args, restore_plan) if return_restore_plan else args
++
++    from slime.backends.sglang_utils.arguments import sglang_parse_args
++    from slime.backends.sglang_utils.arguments import validate_args as sglang_validate_args
++
+     skip_sglang = pre.debug_train_only or pre.load_debug_rollout_data is not None
+ 
+     # Phase 1: Parse sglang args independently (separate parser, parse_known_args).
+@@ -1963,7 +1970,21 @@ def slime_validate_args(args):
+     # HuggingFace/finetune fallback can replace --load or disable optimizer load.
+     from slime.data.checkpoint import resolve_checkpoint
+ 
+-    args, restore_plan = resolve_checkpoint(args)
++    if getattr(args, "train_backend", "megatron") == "fsdp":
++        from slime.data.checkpoint import RestorePlan
++
++        restore_plan = RestorePlan()
++        if args.start_rollout_id is None:
++            args.start_rollout_id = 0
++    else:
++        args, restore_plan = resolve_checkpoint(args)
++        _resolve_megatron_initial_weights(args)
++
++    return _validate_common_training_args(args, restore_plan, get_pg_loss_type)
++
++
++def _resolve_megatron_initial_weights(args):
++    """Apply Megatron checkpoint/HF fallback only to the Megatron backend."""
+     load_is_megatron = (
+         args.load is not None
+         and os.path.exists(args.load)
+@@ -1987,6 +2008,9 @@ def slime_validate_args(args):
+         if args.start_rollout_id is None:
+             args.start_rollout_id = 0
+ 
++
++def _validate_common_training_args(args, restore_plan, get_pg_loss_type):
++    """Validate shared training and rollout options after backend checkpoint setup."""
+     if args.eval_interval is not None:
+         assert args.eval_datasets, "Evaluation datasets must be configured when eval_interval is set."
+ 
+diff --git a/tests/test_fsdp_entry.py b/tests/test_fsdp_entry.py
+new file mode 100644
+index 00000000..5c8fbc8c
+--- /dev/null
++++ b/tests/test_fsdp_entry.py
+@@ -0,0 +1,61 @@
++"""Regression checks for the FSDP entry, run without optional trainer imports."""
++
++import importlib.abc
++import sys
++
++import pytest
++
++from slime.utils.arguments import parse_args
++
++
++class BlockTrainingDependencies(importlib.abc.MetaPathFinder):
++    def find_spec(self, fullname, path=None, target=None):
++        if fullname.split(".")[0] in {"megatron", "megatron_adaptor", "transformer_engine", "sglang"}:
++            raise AssertionError(f"Unexpected optional dependency: {fullname}")
++
++
++@pytest.fixture
++def cli(monkeypatch, tmp_path):
++    argv = ["train.py", "--train-backend", "fsdp", "--fsdp-provider", "fsdpturbo",
++            "--fsdp-init-only", "--fsdp-python-executable", sys.executable,
++            "--fsdp-init-report", str(tmp_path / "report.json"),
++            "--actor-num-gpus-per-node", "2", "--num-gpus-per-node", "4", "--rollout-batch-size", "2"]
++    monkeypatch.setattr(sys, "argv", argv)
++    blocker = BlockTrainingDependencies()
++    sys.meta_path.insert(0, blocker)
++    yield argv
++    sys.meta_path.remove(blocker)
++
++
++def test_fsdp_parser_owns_defaults_without_megatron(cli):
++    args, restore = parse_args(return_restore_plan=True)
++    assert args.train_backend == "fsdp"
++    assert args.actor_num_gpus_per_node == 2
++    assert args.start_rollout_id == 0
++    assert args.offload_train is False
++    assert args.debug_train_only is True
++    assert restore.mode == "new"
++
++
++@pytest.mark.parametrize("option", ["--colocate", "--offload-train", "--use-kl-loss", "--release-train"])
++def test_reject_unsupported_modes(cli, option):
++    cli.append(option)
++    with pytest.raises(ValueError, match="not supported"):
++        parse_args()
++
++
++def test_reject_training_until_implemented(cli):
++    cli.remove("--fsdp-init-only")
++    with pytest.raises(ValueError, match="not implemented"):
++        parse_args()
++
++
++def test_reject_unknown_argument(cli):
++    cli.append("--fsdp-typo")
++    with pytest.raises(SystemExit):
++        parse_args()
++
++
++def test_fsdp_actor_import_is_lazy(cli):
++    from slime.backends.fsdp_utils.actor import FSDPTrainRayActor
++    assert FSDPTrainRayActor.__name__ == "FSDPTrainRayActor"
+diff --git a/train.py b/train.py
+index ffbb5d74..47e75c3b 100644
+--- a/train.py
++++ b/train.py
+@@ -101,6 +101,12 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
+ 
+ def main(args, restore_plan):
+     """Own the attempt's exit policy; actors only clean up their own resources."""
++    if getattr(args, "fsdp_init_only", False):
++        from slime.backends.fsdp_utils.preflight import run_initialization_check
++
++        run_initialization_check(args)
++        return
++
+     with Cleanup() as cleanup:
+         init_tracking(args)
+         startup = None
+-- 
+2.54.0
+

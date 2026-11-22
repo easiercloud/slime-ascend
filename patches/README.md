@@ -8,6 +8,7 @@
 patches/
 ├── npu-compat/       # NPU 硬件差异性适配（永久性）
 ├── upstream-fixes/   # 上游 bug 的临时 workaround（预期上游修复后删除）
+├── features/         # slime-ascend 维护的功能扩展（例如 FSDPTurbo 后端）
 ├── third_party/      # 外部依赖的固定版本补丁
 └── MANIFEST.toml     # 补丁清单和元数据
 ```
@@ -54,12 +55,17 @@ patches/
 
 构建脚本会：
 1. Checkout `slime` submodule 到指定 commit
-2. 按 `MANIFEST.toml` 顺序使用 `git am` 应用 `npu-compat`、`upstream-fixes` 补丁
+2. 按 `npu-compat` → `upstream-fixes` → `features` 分类顺序，分类内按 `MANIFEST.toml` 顺序使用 `git am` 应用补丁
 3. 生成可用的 slime-ascend
 
 ## 维护补丁
 
 ### 添加新补丁
+
+功能扩展使用 `features/`，硬件兼容使用 `npu-compat/`。FSDPTurbo 的入口、
+Actor 和相关测试通过功能补丁交付；环境安装、运行示例和用户文档在外层仓库维护。
+第三方依赖保持固定版本，需要修改其源码时才添加 `third_party/` 补丁。
+构建会清理子模块工作区；开发时应先保存改动，并在独立目录回放验证。
 
 ```bash
 # 1. 在 slime 工作区中修改并提交文件

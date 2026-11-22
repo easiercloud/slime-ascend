@@ -3,7 +3,7 @@
 #
 # 功能：
 #   1. 重置 slime submodule 到指定 commit
-#   2. 按顺序应用补丁 (npu-compat → upstream-fixes)
+#   2. 按顺序应用补丁 (npu-compat → upstream-fixes → features)
 #   3. 生成可用的 slime-ascend
 
 set -euo pipefail
@@ -226,6 +226,8 @@ echo ""
 apply_patch_category "npu-compat" || exit 1
 echo ""
 apply_patch_category "upstream-fixes" || exit 1
+echo ""
+apply_patch_category "features" || exit 1
 echo ""
 
 # 步骤 4: 验证构建
