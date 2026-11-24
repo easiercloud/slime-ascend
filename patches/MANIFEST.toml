@@ -114,6 +114,16 @@ base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
 sha256 = "96e9564523785fb552b5c0250aed3049e9b07d3e44ab98b9bcb2b995500b8a5f"
 
 [[patches]]
+id = "slime:features:fsdpturbo-checkpoint"
+category = "features"
+target = "slime"
+file = "0005-fsdpturbo-checkpoint.patch"
+summary = "Sharded model and AdamW checkpoints with exact trainer continuation validation"
+issue = "local:fsdpturbo-checkpoint-milestone"
+base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
+sha256 = "48f608486749d1204ec00272456519eb813cd1728d9c1769a110238034d78f7e"
+
+[[patches]]
 id = "mbridge:npu-device"
 category = "third_party"
 target = "mbridge"
