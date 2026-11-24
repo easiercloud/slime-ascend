@@ -104,6 +104,16 @@ base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
 sha256 = "22dd018f9e741f3355b7f8ceaa92b3515c0aca7a7b3ec4cf19ebaace8a1edd86"
 
 [[patches]]
+id = "slime:features:fsdpturbo-online"
+category = "features"
+target = "slime"
+file = "0004-fsdpturbo-online.patch"
+summary = "HF disk publication and two-rollout FSDPTurbo SGLang GRPO validation"
+issue = "local:fsdpturbo-online-milestone"
+base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
+sha256 = "96e9564523785fb552b5c0250aed3049e9b07d3e44ab98b9bcb2b995500b8a5f"
+
+[[patches]]
 id = "mbridge:npu-device"
 category = "third_party"
 target = "mbridge"
