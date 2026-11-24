@@ -94,6 +94,16 @@ base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
 sha256 = "28f7dd1844100633b00742f137321c12ec87909543e7b7719cb641dcde696837"
 
 [[patches]]
+id = "slime:features:fsdpturbo-grpo"
+category = "features"
+target = "slime"
+file = "0003-fsdpturbo-grpo.patch"
+summary = "Fixed-rollout GRPO actor updates through BatchBuilder and two-rank numerical validation"
+issue = "local:fsdpturbo-grpo-milestone"
+base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
+sha256 = "22dd018f9e741f3355b7f8ceaa92b3515c0aca7a7b3ec4cf19ebaace8a1edd86"
+
+[[patches]]
 id = "mbridge:npu-device"
 category = "third_party"
 target = "mbridge"

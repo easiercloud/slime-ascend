@@ -1,15 +1,17 @@
-# FSDPTurbo 后端适配：初始化与模型验证
+# FSDPTurbo 后端适配：初始化、模型和固定 rollout GRPO 验证
 
 本交付实现 FSDP 参数入口、训练 Actor 选择、独立 Python 环境、双卡通信与资源释放。
 选择 `--fsdp-init-only` 验证初始化，或 `--fsdp-model-check` 验证 Qwen3-0.6B
 模型加载、FSDP2 分片、前后向和一次 AdamW 更新。模型阶段详见 [模型验收](fsdp2-model.md)。
-目前仍未接入 GRPO loss、推理生成、权重同步或 checkpoint 保存。
+`--fsdp-grpo-check` 接通固定 rollout 的数据读取、response log-prob、GRPO loss 和连续两次更新，
+详见 [GRPO 验收](fsdp2-grpo.md)。推理生成、权重同步和 checkpoint 保存仍待接入。
 
 ## 代码维护与构建
 
 外层 slime-ascend 是交付仓库，`slime/` 是固定上游提交应用补丁后的运行代码。
 `patches/features/0001-fsdpturbo-backend-entry.patch` 包含入口、Actor、预检和单测。
 `patches/features/0002-fsdpturbo-qwen3-model.patch` 在其后添加模型加载、分片及数值验收。
+`patches/features/0003-fsdpturbo-grpo.patch` 添加固定 rollout 训练链路和 GRPO 数值验收。
 `patches/npu-compat/bounded-port-search.patch` 单独保存现有基线需要的端口查找修复。
 补丁由 `patches/MANIFEST.toml` 注册并校验 SHA256；`build.sh` 按
 `npu-compat`、`upstream-fixes`、`features` 顺序应用，每类内遵循清单顺序。
@@ -72,11 +74,12 @@ FSDPTurbo 自身注册可选 CUDA 算子时可能导入它，报告在 `optional
 ```bash
 PYTHONPATH="$PWD/slime${PYTHONPATH:+:$PYTHONPATH}" python -m pytest \
   slime/tests/test_fsdp_entry.py \
+  slime/tests/test_fsdp_model.py slime/tests/test_fsdp_grpo.py \
   slime/tests/test_megatron_argument_validation.py \
   slime/tests/utils/test_sglang_arguments.py -q
 ```
 
 默认训练后端仍为 Megatron。FSDP 初始化拒绝 offload、同卡训练推理、PPO critic、
 reference/KL、OPD、容错、checkpoint、routing replay 等未实现组合。
-97项入口/参数测试和双卡通信通过并不能代替完整GRPO回归；后续模型、训练、
-权重发布和checkpoint交付必须增加相应验收。
+入口/参数测试、模型验收和固定 rollout GRPO 验收不能代替在线生成与训练闭环；
+后续权重发布和 checkpoint 交付必须增加相应验收。

@@ -1,0 +1,963 @@
+From 962e498e4b9eceea3010ff3f0ea6d330f5e219e4 Mon Sep 17 00:00:00 2001
+From: WBiXin <wangbingxuan@huawei.com>
+Date: Sat, 21 Nov 2026 20:51:51 +0800
+Subject: [PATCH] Add fixed-rollout GRPO training and two-rank FSDPTurbo
+ numerical validation
+
+---
+ docs/en/fsdp-init.md                      |   9 +-
+ slime/backends/fsdp_utils/actor.py        |  25 ++-
+ slime/backends/fsdp_utils/arguments.py    |  52 +++++-
+ slime/backends/fsdp_utils/grpo.py         | 115 +++++++++++++
+ slime/backends/fsdp_utils/grpo_check.py   | 167 +++++++++++++++++++
+ slime/backends/fsdp_utils/grpo_fixture.py |  47 ++++++
+ slime/backends/fsdp_utils/preflight.py    |  12 +-
+ slime/backends/fsdp_utils/trainer.py      | 159 ++++++++++++++++++
+ tests/test_fsdp_entry.py                  |  13 ++
+ tests/test_fsdp_grpo.py                   | 187 ++++++++++++++++++++++
+ train.py                                  |   2 +-
+ 11 files changed, 779 insertions(+), 9 deletions(-)
+ create mode 100644 slime/backends/fsdp_utils/grpo.py
+ create mode 100644 slime/backends/fsdp_utils/grpo_check.py
+ create mode 100644 slime/backends/fsdp_utils/grpo_fixture.py
+ create mode 100644 slime/backends/fsdp_utils/trainer.py
+ create mode 100644 tests/test_fsdp_grpo.py
+
+diff --git a/docs/en/fsdp-init.md b/docs/en/fsdp-init.md
+index b1b96a3e..41584dad 100644
+--- a/docs/en/fsdp-init.md
++++ b/docs/en/fsdp-init.md
+@@ -5,7 +5,10 @@ Python environment. `--fsdp-init-only` performs the communication check without
+ loading weights. Alternatively, `--fsdp-model-check --hf-checkpoint /local/model`
+ validates Qwen3 forward/backward and a fixed AdamW step against an unsharded HF
+ reference on exactly two training devices. Both modes require `--fsdp-init-report`.
+-GRPO, generation, weight publication and checkpoints remain unimplemented.
++`--fsdp-grpo-check` exercises fixed-rollout BatchBuilder/object-store/actor.train
++GRPO updates. It requires two training devices and an init report; see the
++slime-ascend delivery's `docs/features/fsdp2-grpo.md` for the fixture and limits.
++Generation, weight publication and checkpoints remain unimplemented.
+ The slime-ascend delivery documents the model check in `docs/features/fsdp2-model.md`.
+ 
+ Run the driver with the original serving Python. Pass an absolute training
+@@ -45,8 +48,8 @@ is outside this milestone. Native extension compilation may slow first startup.
+ 
+ Rejected configurations include offload, colocation, critic/PPO, reference/KL,
+ OPD, fault tolerance, checkpoint load/save, routing replay and non-object-store
+-rollout transport. The GRPO option here selects the intended future algorithm;
+-no GRPO loss is computed during initialization.
++rollout transport. No GRPO loss is computed during initialization; the separate
++`--fsdp-grpo-check` mode runs fixed-rollout GRPO training and numerical checks.
+ 
+ The existing Megatron entry remains the default. Its checkpoint fallback is
+ backend-specific; FSDP initialization starts with an empty restore plan. Tests
+diff --git a/slime/backends/fsdp_utils/actor.py b/slime/backends/fsdp_utils/actor.py
+index 15bb36dc..eb924fbd 100644
+--- a/slime/backends/fsdp_utils/actor.py
++++ b/slime/backends/fsdp_utils/actor.py
+@@ -32,6 +32,8 @@ class FSDPTrainRayActor(TrainRayActor):
+ 
+         self.provider = FSDPTurbo.__name__
+         self.provider_config = FSDPTurboConfig.__name__
++        self.grpo_trainer = None
++        self.grpo_observer = None
+         self.train_parallel_config = {
+             "dp_size": self._world_size, "cp_size": 1, "vpp_size": 1,
+             "microbatch_group_size_per_vp_stage": 1,
+@@ -81,13 +83,34 @@ class FSDPTrainRayActor(TrainRayActor):
+ 
+     def shutdown(self):
+         """Destroy this actor's process groups before Ray releases its resources."""
++        self.grpo_trainer = self.grpo_observer = None
+         if dist.is_initialized():
+             dist.destroy_process_group()
+         set_gloo_group(None)
+         return {"rank": self._rank, "distributed_initialized": dist.is_initialized()}
+ 
+     def train(self, rollout_id, rollout_data_ref, external_data=None):
+-        raise NotImplementedError("FSDP GRPO training is not implemented yet")
++        from slime.backends.fsdp_utils.trainer import GRPOTrainer
++        from slime.utils.data import process_rollout_data
++
++        if not self.args.fsdp_grpo_check or external_data is not None:
++            raise ValueError("FSDP train currently supports the fixed GRPO check without external data")
++        data = process_rollout_data(rollout_data_ref, self._rank, self._world_size)
++        if self.grpo_trainer is None:
++            self.grpo_trainer = GRPOTrainer(self.args)
++        result = self.grpo_trainer.train_batch(rollout_id, data, self.grpo_observer)
++        if self.grpo_observer is not None:
++            result["validation"] = self.grpo_observer.report(self.grpo_trainer)
++            self.grpo_observer = None
++        return result
++
++    def prepare_grpo_check(self, rollout_data_ref):
++        from slime.backends.fsdp_utils.grpo_check import GRPOOracle
++        from slime.utils.data import process_rollout_data
++
++        data = process_rollout_data(rollout_data_ref, self._rank, self._world_size)
++        self.grpo_observer = GRPOOracle(self.args, data)
++        return {"rank": self._rank, "reference_ready": True}
+ 
+     def save_model(self, rollout_id, force_sync=False):
+         raise NotImplementedError("FSDP checkpoint saving is not implemented yet")
+diff --git a/slime/backends/fsdp_utils/arguments.py b/slime/backends/fsdp_utils/arguments.py
+index 125fc04b..d12e6fc5 100644
+--- a/slime/backends/fsdp_utils/arguments.py
++++ b/slime/backends/fsdp_utils/arguments.py
+@@ -1,6 +1,7 @@
+ """Parse FSDP configuration without importing the Megatron stack."""
+ 
+ import argparse
++import math
+ import os
+ from pathlib import Path
+ 
+@@ -8,11 +9,12 @@ from pathlib import Path
+ def validate_fsdp_args(args):
+     """Reject features that have not yet been integrated with this backend."""
+     model_check = getattr(args, "fsdp_model_check", False)
+-    if not args.fsdp_init_only and not model_check:
+-        raise ValueError("Choose --fsdp-init-only or --fsdp-model-check; GRPO training is not implemented yet")
++    grpo_check = getattr(args, "fsdp_grpo_check", False)
++    if not args.fsdp_init_only and not model_check and not grpo_check:
++        raise ValueError("Choose --fsdp-init-only, --fsdp-model-check or --fsdp-grpo-check; online training is not implemented yet")
+     if args.fsdp_init_report is None:
+         raise ValueError("FSDP checks require --fsdp-init-report")
+-    if model_check:
++    if model_check or grpo_check:
+         if args.actor_num_gpus_per_node != 2:
+             raise ValueError("--fsdp-model-check requires exactly two training devices")
+         if not args.hf_checkpoint or not (Path(args.hf_checkpoint) / "config.json").is_file():
+@@ -40,6 +42,44 @@ def validate_fsdp_args(args):
+         raise ValueError("FSDP currently requires --rollout-data-transport object-store")
+     if args.update_weight_mode != "full":
+         raise ValueError("FSDP currently supports only full weight updates")
++    if grpo_check:
++        validate_grpo_args(args)
++
++
++def validate_grpo_args(args):
++    for name in (
++        "entropy_coef", "normalize_advantages", "calculate_per_token_loss", "use_tis",
++        "use_opsm", "get_mismatch_metrics", "use_score_centering", "use_dynamic_batch_size",
++        "use_rollout_entropy", "reset_optimizer_states", "use_stateless_adam",
++        "custom_loss_function_path", "custom_advantage_function_path",
++        "custom_tis_function_path", "custom_pg_loss_reducer_function_path",
++        "custom_reward_post_process_path", "custom_convert_samples_to_train_data_path",
++    ):
++        if getattr(args, name, None):
++            raise ValueError(f"--{name.replace('_', '-')} is not supported by the FSDP GRPO stage")
++    if args.loss_type != "policy_loss" or getattr(args, "pg_loss_type", None) not in (None, "ppo"):
++        raise ValueError("FSDP GRPO requires the PPO-clipped policy_loss objective")
++    if not args.compute_advantages_and_returns or not args.rewards_normalization:
++        raise ValueError("FSDP GRPO requires BatchBuilder reward normalization and advantage computation")
++    if args.rollout_top_p != 1.0:
++        raise ValueError("FSDP GRPO currently requires --rollout-top-p 1")
++    for name in ("lr", "rollout_temperature", "fsdp_adam_eps"):
++        value = getattr(args, name)
++        if not math.isfinite(value) or value <= 0:
++            raise ValueError(f"{name} must be finite and positive")
++    for name in ("eps_clip", "clip_grad", "fsdp_weight_decay"):
++        value = getattr(args, name)
++        if not math.isfinite(value) or value < 0:
++            raise ValueError(f"{name} must be finite and nonnegative")
++    if args.eps_clip > 1:
++        raise ValueError("eps_clip must not exceed 1")
++    if args.eps_clip_high is not None and (not math.isfinite(args.eps_clip_high) or args.eps_clip_high < 0):
++        raise ValueError("eps_clip_high must be finite and nonnegative")
++    if args.eps_clip_c is not None and (not math.isfinite(args.eps_clip_c) or args.eps_clip_c <= 1):
++        raise ValueError("eps_clip_c must be finite and greater than 1")
++    for name in ("fsdp_adam_beta1", "fsdp_adam_beta2"):
++        if not 0 <= getattr(args, name) < 1:
++            raise ValueError(f"{name} must be in [0, 1)")
+ 
+ 
+ def parse_fsdp_args(extra_args_provider):
+@@ -54,6 +94,12 @@ def parse_fsdp_args(extra_args_provider):
+     mode.add_argument("--fsdp-init-only", action="store_true")
+     mode.add_argument("--fsdp-model-check", action="store_true",
+                       help="Validate Qwen3 loading, sharding, backward and a fixed AdamW step; no GRPO")
++    mode.add_argument("--fsdp-grpo-check", action="store_true",
++                      help="Validate two GRPO updates through BatchBuilder and actor.train on a fixed fixture")
++    parser.add_argument("--fsdp-adam-beta1", type=float, default=0.9)
++    parser.add_argument("--fsdp-adam-beta2", type=float, default=0.999)
++    parser.add_argument("--fsdp-adam-eps", type=float, default=1e-6)
++    parser.add_argument("--fsdp-weight-decay", type=float, default=0.01)
+     parser.add_argument("--fsdp-init-report", type=Path)
+     parser.add_argument("--debug-train-only", action="store_true")
+     parser.add_argument("--debug-rollout-only", action="store_true")
+diff --git a/slime/backends/fsdp_utils/grpo.py b/slime/backends/fsdp_utils/grpo.py
+new file mode 100644
+index 00000000..a78ede7f
+--- /dev/null
++++ b/slime/backends/fsdp_utils/grpo.py
+@@ -0,0 +1,115 @@
++"""Dense, padded GRPO primitives independent of Megatron and FSDPTurbo imports."""
++
++import math
++
++import torch
++import torch.nn.functional as F
++
++
++def validate_batch(data, vocab_size):
++    """Validate BatchBuilder's DP-local view before distributed model execution."""
++    required = ("tokens", "response_lengths", "total_lengths", "loss_masks", "rewards",
++                "rollout_ids", "rollout_mask_sums", "partition", "micro_batch_indices",
++                "num_microbatches", "global_batch_sizes")
++    for key in required:
++        if key not in data:
++            raise ValueError(f"Missing rollout field: {key}")
++    n = len(data["tokens"])
++    if not n:
++        raise ValueError("Every training rank must receive samples")
++    for key in required[:8]:
++        if len(data[key]) != n:
++            raise ValueError(f"Unaligned rollout field: {key}")
++    for key in ("multimodal_train_inputs", "teacher_log_probs", "rollout_routed_experts",
++                "rollout_top_p_token_ids", "rollout_top_p_token_offsets"):
++        if key in data:
++            raise ValueError(f"Unsupported GRPO payload: {key}")
++    for i in range(n):
++        tokens, mask = torch.as_tensor(data["tokens"][i]), torch.as_tensor(data["loss_masks"][i])
++        length, response = data["total_lengths"][i], data["response_lengths"][i]
++        if not isinstance(length, int) or not isinstance(response, int):
++            raise ValueError("Sequence and response lengths must be integers")
++        if not isinstance(data["rollout_ids"][i], int) or not isinstance(data["partition"][i], int):
++            raise ValueError("Rollout IDs and partition indices must be integers")
++        if tokens.ndim != 1 or tokens.dtype not in (torch.int32, torch.int64):
++            raise ValueError("Tokens must be one-dimensional integer arrays")
++        if len(tokens) != length or not 0 <= response < length:
++            raise ValueError("Response length must leave at least one prompt token")
++        if int(tokens.min()) < 0 or int(tokens.max()) >= vocab_size:
++            raise ValueError("Token ID outside model vocabulary")
++        if mask.ndim != 1 or mask.numel() != response or not torch.all((mask == 0) | (mask == 1)):
++            raise ValueError("Loss masks must be binary and response-aligned")
++        if not math.isfinite(float(data["rewards"][i])):
++            raise ValueError("Rewards must be finite")
++        denominator = float(data["rollout_mask_sums"][i])
++        if not math.isfinite(denominator) or denominator < mask.sum().item():
++            raise ValueError("Invalid whole-rollout loss-mask denominator")
++    if "rollout_log_probs" in data:
++        if len(data["rollout_log_probs"]) != n:
++            raise ValueError("Unaligned rollout log probabilities")
++        for old, length in zip(data["rollout_log_probs"], data["response_lengths"], strict=True):
++            old = torch.as_tensor(old)
++            if old.ndim != 1 or old.numel() != length or not torch.isfinite(old).all():
++                raise ValueError("Rollout log probabilities must be finite and response-aligned")
++    counts, sizes = data["num_microbatches"], data["global_batch_sizes"]
++    if not counts or len(counts) != len(sizes) or any(not isinstance(x, int) or x <= 0 for x in [*counts, *sizes]):
++        raise ValueError("Invalid optimizer-step schedule")
++    microbatches = data["micro_batch_indices"]
++    if len(microbatches) != sum(counts) or any(not mb for mb in microbatches):
++        raise ValueError("Invalid microbatch schedule")
++    flat = [i for mb in microbatches for i in mb]
++    if any(not isinstance(i, int) for i in flat) or sorted(flat) != list(range(n)):
++        raise ValueError("Microbatch schedule must consume each local sample exactly once")
++    if len(data["partition"]) != n or len(set(data["partition"])) != n:
++        raise ValueError("Invalid global sample partition")
++
++
++def collate(data, indices, device):
++    """Right-pad independent sequences; use attention masks for HF eager attention."""
++    lengths = [data["total_lengths"][i] for i in indices]
++    ids = torch.zeros((len(indices), max(lengths)), dtype=torch.long, device=device)
++    attention = torch.zeros_like(ids)
++    for row, (i, length) in enumerate(zip(indices, lengths, strict=True)):
++        ids[row, :length] = torch.as_tensor(data["tokens"][i], device=device, dtype=torch.long)
++        attention[row, :length] = 1
++    return {"input_ids": ids, "attention_mask": attention, "use_cache": False}
++
++
++def response_log_probs(logits, input_ids, lengths, response_lengths, temperature):
++    """The first response target is predicted at prompt_length-1, including EOS."""
++    result = []
++    for row, (length, response) in enumerate(zip(lengths, response_lengths, strict=True)):
++        prompt = length - response
++        rows = logits[row, prompt - 1:length - 1].float() / temperature
++        targets = input_ids[row, prompt:length]
++        result.append(-F.cross_entropy(rows, targets, reduction="none"))
++    return result
++
++
++def clipped_policy_loss(new, old, advantage, clip_low, clip_high, dual_clip=None):
++    """Eager PPO clip objective, matching slime.utils.ppo_utils without torch.compile."""
++    ratio = (new - old.detach()).exp()
++    advantage = torch.as_tensor(advantage, dtype=new.dtype, device=new.device).detach()
++    unclipped = -ratio * advantage
++    clipped = -ratio.clamp(1 - clip_low, 1 + clip_high) * advantage
++    loss = torch.maximum(unclipped, clipped)
++    if dual_clip is not None:
++        loss = torch.where(advantage < 0, torch.minimum(loss, -dual_clip * advantage), loss)
++    return loss, (clipped > unclipped).float(), old.detach() - new
++
++
++def microbatch_loss(args, data, indices, new_log_probs, old_log_probs):
++    """Sum each segment's share of its rollout mean; caller scales for DP/step."""
++    loss = sum(log_probs.sum() * 0 for log_probs in new_log_probs)
++    metrics = loss.detach().new_zeros(3)
++    for i, new in zip(indices, new_log_probs, strict=True):
++        old = old_log_probs[i].to(device=new.device, dtype=torch.float32)
++        values, clipped, kl = clipped_policy_loss(new, old, data["rewards"][i], args.eps_clip,
++                                                 args.eps_clip_high, args.eps_clip_c)
++        mask = torch.as_tensor(data["loss_masks"][i], device=new.device, dtype=torch.float32)
++        denominator = max(float(data["rollout_mask_sums"][i]), 1.0)
++        term = (values * mask).sum() / denominator
++        loss = loss + term
++        metrics += torch.stack((term.detach(), (clipped * mask).sum() / denominator,
++                                (kl.detach() * mask).sum() / denominator))
++    return loss, metrics
+diff --git a/slime/backends/fsdp_utils/grpo_check.py b/slime/backends/fsdp_utils/grpo_check.py
+new file mode 100644
+index 00000000..040bdecf
+--- /dev/null
++++ b/slime/backends/fsdp_utils/grpo_check.py
+@@ -0,0 +1,167 @@
++"""Independent, stepwise unsharded GRPO oracle on identical input weights.
++
++Each step starts from the actor's FP32 weights. Reference AdamW moments and
++original old logprobs are retained independently. This isolates backend math
++from BF16 boundary crossings due to preceding optimizer rounding differences.
++It is NOT an independent multi-step trajectory-equivalence test.
++"""
++
++import math
++
++import torch
++import torch.distributed as dist
++from torch.distributed.tensor import DTensor
++
++from slime.utils import accelerator
++from .model import load_qwen3
++from .model_check import Comparison
++
++
++def reference_forward(model, data, indices, temperature, device):
++    lengths = [len(data["tokens"][i]) for i in indices]
++    ids = torch.zeros(len(indices), max(lengths), dtype=torch.long, device=device)
++    mask = torch.zeros_like(ids)
++    for row, (i, length) in enumerate(zip(indices, lengths, strict=True)):
++        ids[row, :length] = torch.as_tensor(data["tokens"][i], device=device)
++        mask[row, :length] = 1
++    logits = model(input_ids=ids, attention_mask=mask, use_cache=False).logits
++    result = []
++    for row, i in enumerate(indices):
++        end, response = lengths[row], data["response_lengths"][i]
++        start = end - response
++        distribution = (logits[row, start - 1:end - 1].float() / temperature).log_softmax(-1)
++        result.append(distribution.gather(-1, ids[row, start:end, None]).squeeze(-1))
++    return result
++
++
++class GRPOOracle:
++    def __init__(self, args, data):
++        from fsdp_turbo.utils.device import set_accelerator_compatible
++
++        set_accelerator_compatible()
++        self.args, self.data = args, data
++        self.rank, self.world = dist.get_rank(), dist.get_world_size()
++        self.device = torch.device(accelerator.device_type(), accelerator.current_device())
++        print(f"[grpo-check rank={self.rank}] independent unsharded reference", flush=True)
++        self.reference = load_qwen3(args.hf_checkpoint, torch.bfloat16).to(self.device)
++        self.master = load_qwen3(args.hf_checkpoint, torch.float32).to(self.device)
++        self.optimizer = torch.optim.AdamW(self.master.parameters(), lr=args.lr,
++                                          betas=(args.fsdp_adam_beta1, args.fsdp_adam_beta2),
++                                          eps=args.fsdp_adam_eps, weight_decay=args.fsdp_weight_decay, foreach=False)
++        self.old = [None] * len(data["tokens"])
++        with torch.no_grad():
++            for indices in data["micro_batch_indices"]:
++                for i, lp in zip(indices, reference_forward(self.reference, data, indices, args.rollout_temperature, self.device), strict=True):
++                    self.old[i] = lp.cpu().clone()
++        self.expected, self.comparisons, self.steps = [], [], []
++        self.old_comparison, self.initial_comparison = Comparison(), Comparison()
++        self.fp32_grads = True
++        self.previous = {}
++
++    def check_old(self, actual):
++        for a, b in zip(actual, self.old, strict=True):
++            self.old_comparison.add(a, b)
++
++    def prepare_step(self, step, model):
++        args, data, device = self.args, self.data, self.device
++        parameters = dict(self.master.named_parameters())
++        compute = dict(self.reference.named_parameters())
++        print(f"[grpo-check rank={self.rank}] independent reference step {step + 1}", flush=True)
++        with torch.no_grad():
++            for name, p in model.named_parameters():
++                actual = p.full_tensor().detach()
++                if step == 0:
++                    self.initial_comparison.add(actual, parameters[name])
++                self.previous[name] = actual.cpu()
++                parameters[name].copy_(actual)
++                compute[name].copy_(actual.to(torch.bfloat16))
++        # Never copy actor optimizer state: the reference retains its own moments.
++        grads = {name: torch.zeros_like(p, device="cpu") for name, p in parameters.items()}
++        log_probs = {}
++        metrics = torch.zeros(3, device=device)
++        offset = sum(data["num_microbatches"][:step])
++        count, global_size = data["num_microbatches"][step], data["global_batch_sizes"][step]
++        for indices in data["micro_batch_indices"][offset:offset + count]:
++            self.reference.zero_grad(set_to_none=True)
++            values = reference_forward(self.reference, data, indices, args.rollout_temperature, device)
++            loss = sum(lp.sum() * 0 for lp in values)
++            for i, lp in zip(indices, values, strict=True):
++                log_probs[i] = lp.detach().cpu()
++                old = self.old[i].to(device)
++                ratio = torch.exp(lp - old)
++                advantage = float(data["rewards"][i])
++                bounded = torch.clamp(ratio, 1 - args.eps_clip, 1 + args.eps_clip_high)
++                objective = torch.minimum(ratio * advantage, bounded * advantage)
++                if args.eps_clip_c is not None and advantage < 0:
++                    objective = torch.maximum(objective, objective.new_tensor(args.eps_clip_c * advantage))
++                mask = torch.as_tensor(data["loss_masks"][i], device=device)
++                divisor = max(float(data["rollout_mask_sums"][i]), 1.0)
++                term = -(objective * mask).sum() / divisor
++                loss = loss + term
++                metrics += torch.stack((term.detach(),
++                                        (((bounded * advantage) < (ratio * advantage)).float() * mask).sum() / divisor,
++                                        ((old - lp.detach()) * mask).sum() / divisor))
++            (loss * self.world / global_size).backward()
++            for name, p in self.reference.named_parameters():
++                grad = p.grad.float()
++                dist.all_reduce(grad)
++                grads[name].add_(grad.cpu(), alpha=1 / self.world)
++                p.grad = None
++        dist.all_reduce(metrics)
++        metrics /= global_size
++        norm = math.sqrt(sum(g.square().sum(dtype=torch.float64).item() for g in grads.values()))
++        scale = min(1.0, args.clip_grad / (norm + 1e-6)) if args.clip_grad > 0 else 1.0
++        for name, p in parameters.items():
++            p.grad = grads[name].to(device) * scale
++        self.optimizer.step()
++        self.optimizer.zero_grad(set_to_none=True)
++        deltas = {name: p.detach().cpu() - self.previous[name] for name, p in parameters.items()}
++        self.expected.append({"grads": grads, "deltas": deltas, "log_probs": log_probs,
++                              "metrics": metrics.cpu().tolist(), "grad_norm": norm})
++        self.comparisons.append({"log_probs": Comparison(), "gradients": Comparison(), "delta": Comparison()})
++
++    def check_log_probs(self, step, indices, actual):
++        for i, value in zip(indices, actual, strict=True):
++            self.comparisons[step]["log_probs"].add(value, self.expected[step]["log_probs"][i])
++
++    def check_gradients(self, step, model):
++        print(f"[grpo-check rank={self.rank}] compare raw gradients step {step + 1}", flush=True)
++        for name, p in model.named_parameters():
++            self.fp32_grads &= isinstance(p.grad, DTensor) and p.dtype == p.grad.dtype == torch.float32
++            self.comparisons[step]["gradients"].add(p.grad.full_tensor(), self.expected[step]["grads"].pop(name))
++
++    def check_update(self, step, model, report):
++        for name, p in model.named_parameters():
++            actual = p.full_tensor().detach().cpu()
++            self.comparisons[step]["delta"].add(actual - self.previous[name], self.expected[step]["deltas"].pop(name))
++        self.steps.append(dict(report))
++
++    def report(self, trainer):
++        limits = {"logprob_max_abs": 1e-3, "loss_abs": 1e-3, "gradient_relative_l2": 0.03,
++                  "gradient_cosine_min": 0.999, "update_relative_l2": 0.10, "grad_norm_relative": 0.03}
++        details = []
++        for step, (actual, expected) in enumerate(zip(self.steps, self.expected, strict=True)):
++            metrics = {name: value.report() for name, value in self.comparisons[step].items()}
++            checks = {"log_probs": metrics["log_probs"]["max_abs"] <= limits["logprob_max_abs"],
++                      "loss": abs(actual["loss"] - expected["metrics"][0]) <= limits["loss_abs"],
++                      "gradients": metrics["gradients"]["relative_l2"] <= limits["gradient_relative_l2"],
++                      "gradient_direction": metrics["gradients"]["cosine"] >= limits["gradient_cosine_min"],
++                      "grad_norm": abs(actual["grad_norm"] - expected["grad_norm"]) / max(expected["grad_norm"], 1e-12) <= limits["grad_norm_relative"],
++                      "update": 0 < metrics["delta"]["actual_norm"] and metrics["delta"]["relative_l2"] <= limits["update_relative_l2"]}
++            details.append({"checks": checks, "metrics": metrics, "reference_loss": expected["metrics"][0],
++                            "reference_grad_norm": expected["grad_norm"]})
++        parameters = list(trainer.model.parameters())
++        checks = {"two_updates": trainer.optimizer_steps == 2 and len(self.steps) == 2,
++                  "initial_exact": self.initial_comparison.report()["max_abs"] == 0,
++                  "old_log_probs": self.old_comparison.report()["max_abs"] <= limits["logprob_max_abs"],
++                  "half_storage": all(isinstance(p, DTensor) and p.to_local().numel() * 2 == p.numel() for p in parameters),
++                  "fp32_master_and_gradients": self.fp32_grads,
++                  "optimizer_states_sharded": len(trainer.optimizer.state) == len(parameters) and all(
++                      isinstance(state[k], DTensor) and state[k].to_local().shape == p.to_local().shape
++                      for p, state in trainer.optimizer.state.items() for k in ("exp_avg", "exp_avg_sq")),
++                  "optimizer_moments_retained": all(int(state["step"].item()) == 2 for state in trainer.optimizer.state.values()),
++                  "numerical_steps": all(all(item["checks"].values()) for item in details)}
++        return {"passed": all(checks.values()), "rank": self.rank, "checks": checks,
++                "comparison_mode": "stepwise identical input weights; independent persistent AdamW moments",
++                "independent_trajectory_equivalence": False,
++                "limits": limits, "steps": details, "old_log_probs": self.old_comparison.report()}
+diff --git a/slime/backends/fsdp_utils/grpo_fixture.py b/slime/backends/fsdp_utils/grpo_fixture.py
+new file mode 100644
+index 00000000..bb79e92a
+--- /dev/null
++++ b/slime/backends/fsdp_utils/grpo_fixture.py
+@@ -0,0 +1,47 @@
++"""Deterministic acceptance fixture using the existing Slime data and actor path."""
++
++import ray
++
++from slime.data.batch_builder import BatchBuilder
++from slime.utils.types import Sample
++
++
++def fixed_samples():
++    rewards = [1.0, 0.0, 0.5, 1.5, 0.0, 1.0, 0.0, 1.0]
++    samples = []
++    for rid, reward in enumerate(rewards):
++        for segment in range((3, 1, 2, 2, 1, 1, 1, 1)[rid]):
++            prompt, response = 5 + rid % 3 + segment, 4 + (rid + segment) % 4
++            tokens = [100 + rid * 53 + segment * 17 + pos * 37 for pos in range(prompt + response)]
++            tokens[-1] = 151645  # Qwen3 end-of-turn target, included in the loss.
++            mask = [int(pos % 3 != 1) for pos in range(response)]
++            samples.append(Sample(index=len(samples), rollout_id=rid, group_index=rid // 4,
++                                  tokens=tokens, response_length=response, reward=reward,
++                                  loss_mask=mask, remove_sample=(rid == 0 and segment == 1),
++                                  status=Sample.Status.TRUNCATED if rid == 7 else Sample.Status.COMPLETED))
++    return samples
++
++
++def run_grpo_check(args, group):
++    if (args.rollout_batch_size, args.n_samples_per_prompt, args.global_batch_size, args.micro_batch_size) != (2, 4, 4, 2):
++        raise ValueError("Fixed GRPO fixture requires rollout-batch-size=2, n-samples-per-prompt=4, global-batch-size=4, micro-batch-size=2")
++    if args.use_rollout_logprobs:
++        raise ValueError("Fixed fixture recomputes old actor logprobs; it has no sampler logprobs")
++    builder = BatchBuilder(args)
++    builder.train_parallel_config = {"dp_size": 2, "cp_size": 1, "vpp_size": 1,
++                                     "microbatch_group_size_per_vp_stage": 1}
++    samples = fixed_samples()
++    converted = builder.convert(samples)
++    refs = builder.split_by_dp(converted)
++    ray.get([actor.prepare_grpo_check.remote(refs) for actor in group._actor_handlers], timeout=1200)
++    ranks = ray.get(group.async_train(0, refs), timeout=1200)
++    owners = {}
++    for rank, result in enumerate(ranks):
++        for i in result["partition"]:
++            owners.setdefault(converted["rollout_ids"][i], set()).add(rank)
++    assert any(len(value) == 2 for value in owners.values()), "Fixture must exercise a rollout split across ranks"
++    return {"fixture": {"rollouts": 8, "segments": len(samples), "prompt_groups": 2,
++                         "segmented_rollout_crosses_ranks": True,
++                         "global_batch_size": 4, "micro_batch_size": 2,
++                         "normalized_rewards": converted["rewards"],
++                         "rollout_mask_sums": converted["rollout_mask_sums"]}, "ranks": ranks}
+diff --git a/slime/backends/fsdp_utils/preflight.py b/slime/backends/fsdp_utils/preflight.py
+index 2d09d3b5..163489ee 100644
+--- a/slime/backends/fsdp_utils/preflight.py
++++ b/slime/backends/fsdp_utils/preflight.py
+@@ -45,6 +45,10 @@ def run_initialization_check(args):
+         models = None
+         if args.fsdp_model_check:
+             models = ray.get([actor.check_model.remote() for actor in group._actor_handlers], timeout=900)
++        grpo = None
++        if args.fsdp_grpo_check:
++            from slime.backends.fsdp_utils.grpo_fixture import run_grpo_check
++            grpo = run_grpo_check(args, group)
+         shutdown = ray.get([actor.shutdown.remote() for actor in group._actor_handlers], timeout=60)
+         assert all(not item["distributed_initialized"] for item in shutdown)
+         result = {"passed": True, "scope": "actor initialization only; no model loaded or generation run",
+@@ -53,11 +57,17 @@ def run_initialization_check(args):
+             result.update(passed=all(item["passed"] for item in models),
+                           scope="Qwen3 masked CE forward/backward/AdamW validation; no GRPO or generation",
+                           models=models)
++        if grpo is not None:
++            result.update(passed=all(item["validation"]["passed"] for item in grpo["ranks"]),
++                          scope="Fixed rollout BatchBuilder/object-store/actor.train GRPO validation; no generation or weight publication",
++                          grpo=grpo)
+         args.fsdp_init_report.parent.mkdir(parents=True, exist_ok=True)
+         args.fsdp_init_report.write_text(json.dumps(result, indent=2) + "\n")
+         if not result["passed"]:
+-            raise RuntimeError(f"FSDP model numerical checks failed; see {args.fsdp_init_report}")
++            raise RuntimeError(f"FSDP numerical checks failed; see {args.fsdp_init_report}")
+         marker = "FSDP_MODEL_CHECK_PASSED" if models is not None else "FSDP_ACTOR_INITIALIZATION_PASSED"
++        if grpo is not None:
++            marker = "FSDP_GRPO_CHECK_PASSED"
+         print(marker, json.dumps(result), flush=True)
+     finally:
+         if group is not None:
+diff --git a/slime/backends/fsdp_utils/trainer.py b/slime/backends/fsdp_utils/trainer.py
+new file mode 100644
+index 00000000..d0682b3f
+--- /dev/null
++++ b/slime/backends/fsdp_utils/trainer.py
+@@ -0,0 +1,159 @@
++"""FSDPTurbo GRPO updates consuming Slime's existing rollout batch contract."""
++
++import math
++
++import torch
++import torch.distributed as dist
++from torch.distributed.fsdp import FSDPModule
++
++from slime.utils import accelerator
++from slime.utils.distributed_utils import get_gloo_group
++
++from .grpo import collate, microbatch_loss, response_log_probs, validate_batch
++from .model import load_qwen3, wrap_qwen3
++
++
++def collective_validate(data, args, vocab_size):
++    """Reject a bad rank's input on every rank before any model collectives."""
++    error = None
++    try:
++        validate_batch(data, vocab_size)
++        if args.use_rollout_logprobs and "rollout_log_probs" not in data:
++            raise ValueError("--use-rollout-logprobs requires rollout_log_probs")
++    except (ValueError, TypeError, IndexError, KeyError, RuntimeError) as exc:
++        error = str(exc)
++    errors = [None] * dist.get_world_size()
++    dist.all_gather_object(errors, error, group=get_gloo_group())
++    if any(errors):
++        raise ValueError(f"Invalid distributed GRPO batch: {errors}")
++    plan = {key: data[key] for key in ("partition", "num_microbatches", "global_batch_sizes",
++                                      "micro_batch_indices", "rollout_ids", "rollout_mask_sums", "rewards")}
++    plan["mask_sums"] = [int(torch.as_tensor(mask).sum()) for mask in data["loss_masks"]]
++    plans = [None] * dist.get_world_size()
++    dist.all_gather_object(plans, plan, group=get_gloo_group())
++    for other in plans:
++        if any(other[key] != plan[key] for key in ("num_microbatches", "global_batch_sizes")):
++            raise ValueError("Training ranks disagree on optimizer-step schedule")
++    partitions = [i for p in plans for i in p["partition"]]
++    if len(set(partitions)) != len(partitions):
++        raise ValueError("Training ranks received overlapping sample partitions")
++    offset = 0
++    seen_rollouts = set()
++    for count, global_size in zip(plan["num_microbatches"], plan["global_batch_sizes"], strict=True):
++        totals, reported, rewards = {}, {}, {}
++        for p in plans:
++            for mb in p["micro_batch_indices"][offset:offset + count]:
++                for i in mb:
++                    rid = p["rollout_ids"][i]
++                    totals[rid] = totals.get(rid, 0) + p["mask_sums"][i]
++                    denominator = float(p["rollout_mask_sums"][i])
++                    if rid in reported and reported[rid] != denominator:
++                        raise ValueError("Segments disagree on whole-rollout mask totals")
++                    reported[rid] = denominator
++                    reward = float(p["rewards"][i])
++                    if rid in rewards and rewards[rid] != reward:
++                        raise ValueError("Segments disagree on normalized rollout reward")
++                    rewards[rid] = reward
++        if totals != reported or len(totals) != global_size or seen_rollouts.intersection(totals):
++            raise ValueError("Invalid global rollout counts, mask totals or cross-step segmentation")
++        seen_rollouts.update(totals)
++        offset += count
++
++
++def make_optimizer(parameters, args):
++    return torch.optim.AdamW(parameters, lr=args.lr,
++                             betas=(args.fsdp_adam_beta1, args.fsdp_adam_beta2),
++                             eps=args.fsdp_adam_eps, weight_decay=args.fsdp_weight_decay, foreach=False)
++
++
++def clip_sharded_gradients(model, max_norm):
++    norm2 = torch.zeros((), device=accelerator.device())
++    for parameter in model.parameters():
++        if parameter.grad is None:
++            raise ValueError("GRPO backward left a parameter without a gradient")
++        norm2 += parameter.grad.to_local().float().square().sum()
++    # This backend fixes replica-DP=1; every unique shard contributes once.
++    dist.all_reduce(norm2)
++    norm = norm2.sqrt().item()
++    if not math.isfinite(norm):
++        raise ValueError("Nonfinite GRPO gradient norm; optimizer step cancelled")
++    scale = min(1.0, max_norm / (norm + 1e-6)) if max_norm > 0 else 1.0
++    for parameter in model.parameters():
++        parameter.grad.mul_(scale)
++    return norm
++
++
++class GRPOTrainer:
++    def __init__(self, args):
++        from fsdp_turbo.utils.device import set_accelerator_compatible
++
++        set_accelerator_compatible()
++        self.args = args
++        self.model = load_qwen3(args.hf_checkpoint, torch.float32)
++        self.turbo = wrap_qwen3(self.model, dist.get_world_size())
++        self.optimizer = make_optimizer(self.model.parameters(), args)
++        self.optimizer_steps = 0
++
++    def _forward(self, data, indices):
++        batch = collate(data, indices, accelerator.device())
++        logits = self.turbo(**batch).logits
++        return response_log_probs(logits, batch["input_ids"], [data["total_lengths"][i] for i in indices],
++                                  [data["response_lengths"][i] for i in indices], self.args.rollout_temperature)
++
++    def train_batch(self, rollout_id, data, observer=None):
++        args, world = self.args, dist.get_world_size()
++        collective_validate(data, args, self.model.config.vocab_size)
++        self.turbo.train()
++        # Freeze old-policy logprobs for the ENTIRE rollout before any updates.
++        if args.use_rollout_logprobs:
++            old = [torch.as_tensor(value).float().detach().clone() for value in data["rollout_log_probs"]]
++        else:
++            old = [None] * len(data["tokens"])
++            with torch.no_grad():
++                for indices in data["micro_batch_indices"]:
++                    for i, value in zip(indices, self._forward(data, indices), strict=True):
++                        old[i] = value.detach().cpu().clone()
++        # A no-grad forward can leave root parameters gathered. Return to FP32
++        # shards before inspecting master weights or starting the training pass.
++        for module in self.model.modules():
++            if isinstance(module, FSDPModule):
++                module.reshard()
++        if observer is not None:
++            observer.check_old(old)
++        offset = 0
++        reports = []
++        for step, (count, global_size) in enumerate(zip(data["num_microbatches"], data["global_batch_sizes"], strict=True)):
++            if observer is not None:
++                observer.prepare_step(step, self.model)
++            self.optimizer.zero_grad(set_to_none=True)
++            metrics = torch.zeros(3, device=accelerator.device())
++            for indices in data["micro_batch_indices"][offset:offset + count]:
++                log_probs = self._forward(data, indices)
++                loss, micro_metrics = microbatch_loss(args, data, indices, log_probs, old)
++                # FSDP averages across ranks, but accumulates microbatches by sum.
++                # Do not divide again by the number of microbatches.
++                (loss * (world / global_size)).backward()
++                metrics += micro_metrics
++                if observer is not None:
++                    observer.check_log_probs(step, indices, log_probs)
++            dist.all_reduce(metrics)
++            metrics /= global_size
++            if not torch.isfinite(metrics).all():
++                raise ValueError("Nonfinite GRPO metrics; optimizer step cancelled")
++            if observer is not None:
++                observer.check_gradients(step, self.model)
++            grad_norm = clip_sharded_gradients(self.model, args.clip_grad)
++            self.optimizer.step()
++            self.optimizer_steps += 1
++            report = {"step": self.optimizer_steps, "loss": metrics[0].item(),
++                      "pg_clipfrac": metrics[1].item(), "ppo_kl": metrics[2].item(),
++                      "grad_norm": grad_norm, "lr": args.lr, "global_rollouts": global_size,
++                      "microbatches_per_rank": count}
++            if observer is not None:
++                observer.check_update(step, self.model, report)
++            reports.append(report)
++            offset += count
++        self.optimizer.zero_grad(set_to_none=True)
++        return {"rollout_id": rollout_id, "optimizer_steps": self.optimizer_steps, "steps": reports,
++                "partition": data["partition"],
++                "old_log_probs_source": "rollout" if args.use_rollout_logprobs else "frozen_actor"}
+diff --git a/tests/test_fsdp_entry.py b/tests/test_fsdp_entry.py
+index 740b9b25..a246e124 100644
+--- a/tests/test_fsdp_entry.py
++++ b/tests/test_fsdp_entry.py
+@@ -79,3 +79,16 @@ def test_model_check_parser_stays_lazy(cli, tmp_path):
+     cli.extend(["--hf-checkpoint", str(tmp_path)])
+     args = parse_args()
+     assert args.fsdp_model_check and not args.fsdp_init_only
++
++
++@pytest.mark.parametrize("extra", [[], ["--entropy-coef", "0.1"], ["--normalize-advantages"],
++                                   ["--rollout-temperature", "0"], ["--use-dynamic-batch-size"]])
++def test_grpo_check_parser_and_rejections(cli, tmp_path, extra):
++    (tmp_path / "config.json").write_text('{"model_type": "qwen3"}')
++    cli[cli.index("--fsdp-init-only")] = "--fsdp-grpo-check"
++    cli.extend(["--hf-checkpoint", str(tmp_path), *extra])
++    if extra:
++        with pytest.raises(ValueError):
++            parse_args()
++    else:
++        assert parse_args().fsdp_grpo_check
+diff --git a/tests/test_fsdp_grpo.py b/tests/test_fsdp_grpo.py
+new file mode 100644
+index 00000000..24813869
+--- /dev/null
++++ b/tests/test_fsdp_grpo.py
+@@ -0,0 +1,187 @@
++"""GRPO contract tests, executable on CPU without importing FSDPTurbo."""
++
++from copy import deepcopy
++from types import SimpleNamespace
++
++import pytest
++import torch
++
++from slime.backends.fsdp_utils.grpo import (clipped_policy_loss, collate, microbatch_loss,
++                                           response_log_probs, validate_batch)
++
++
++def batch():
++    return {"tokens": [torch.tensor([1, 2, 3, 4]), torch.tensor([2, 3, 4])],
++            "total_lengths": [4, 3], "response_lengths": [2, 1],
++            "loss_masks": [[1, 0], [1]], "rewards": [1.0, 1.0],
++            "rollout_ids": [0, 0], "rollout_mask_sums": [2, 2], "partition": [0, 1],
++            "micro_batch_indices": [[0], [1]], "num_microbatches": [2], "global_batch_sizes": [1]}
++
++
++def args():
++    return SimpleNamespace(eps_clip=0.2, eps_clip_high=0.3, eps_clip_c=None)
++
++
++def test_response_alignment_temperature_and_padding():
++    data = batch()
++    padded = collate(data, [0, 1], "cpu")
++    assert padded["input_ids"].tolist() == [[1, 2, 3, 4], [2, 3, 4, 0]]
++    assert padded["attention_mask"].tolist() == [[1, 1, 1, 1], [1, 1, 1, 0]]
++    logits = torch.arange(2 * 4 * 5, dtype=torch.float32).reshape(2, 4, 5).requires_grad_()
++    actual = response_log_probs(logits, padded["input_ids"], [4, 3], [2, 1], 0.7)
++    expected = (logits / 0.7).log_softmax(-1)
++    torch.testing.assert_close(actual[0], expected[0, [1, 2], [3, 4]])
++    torch.testing.assert_close(actual[1], expected[1, [1], [4]])
++    sum(v.sum() for v in actual).backward()
++    assert logits.grad[0, 0].count_nonzero() == logits.grad[0, 3].count_nonzero() == 0
++    assert logits.grad[1, 2:].count_nonzero() == 0
++
++
++@pytest.mark.parametrize("advantage", [2.0, -2.0])
++@pytest.mark.parametrize("dual", [None, 2.0])
++def test_clipping_branches_and_detached_old_advantage(advantage, dual):
++    ratio = torch.tensor([0.4, 0.9, 1.1, 1.8, 3.0])
++    new = ratio.log().requires_grad_()
++    old = torch.zeros_like(new, requires_grad=True)
++    adv = torch.tensor(advantage, requires_grad=True)
++    loss, _, _ = clipped_policy_loss(new, old, adv, 0.2, 0.3, dual)
++    expected = -torch.minimum(ratio * advantage, ratio.clamp(0.8, 1.3) * advantage)
++    if dual and advantage < 0:
++        expected = expected.clamp(max=-dual * advantage)
++    torch.testing.assert_close(loss, expected)
++    loss.sum().backward()
++    assert old.grad is None and adv.grad is None
++    # Positive advantage clips the high ratio branch; negative clips the low.
++    assert new.grad[3 if advantage > 0 else 0] == 0
++
++
++def test_segment_denominator_and_microbatch_accumulation():
++    data = batch()
++    parameter = torch.tensor(0.0, requires_grad=True)
++    old = [torch.zeros(2), torch.zeros(1)]
++    for i in (0, 1):
++        lp = parameter.expand(data["response_lengths"][i])
++        loss, _ = microbatch_loss(args(), data, [i], [lp], old)
++        # Simulate two ranks, each owning one segment. FSDP averages grads.
++        (loss * 2).backward()
++    assert parameter.grad.item() / 2 == pytest.approx(-1.0)
++
++
++@pytest.mark.parametrize("response", [0, 2])
++def test_empty_or_fully_masked_response_is_differentiable_zero(response):
++    data = batch()
++    data["response_lengths"][0] = response
++    data["loss_masks"][0] = [0] * response
++    data["rollout_mask_sums"][0] = 0
++    logits = torch.randn(1, 4, 5, requires_grad=True)
++    lp = response_log_probs(logits, data["tokens"][0][None], [4], [response], 1.0)
++    loss, metrics = microbatch_loss(args(), data, [0], lp, [torch.zeros(response)])
++    loss.backward()
++    assert loss.item() == 0 and metrics.count_nonzero() == 0 and logits.grad.count_nonzero() == 0
++
++
++@pytest.mark.parametrize("field,value", [
++    ("rewards", [float("nan"), 1]), ("loss_masks", [[1], [1]]),
++    ("response_lengths", [4, 1]), ("rollout_mask_sums", [0, 2]),
++    ("micro_batch_indices", [[0], [0]]), ("global_batch_sizes", []),
++    ("rollout_log_probs", [[0, float("inf")], [0]]),
++])
++def test_malformed_batches_rejected(field, value):
++    data = batch()
++    validate_batch(data, 5)
++    data[field] = value
++    with pytest.raises(ValueError):
++        validate_batch(data, 5)
++
++
++@pytest.mark.parametrize("defect", [None, "overlap", "denominator", "schedule", "remote_error"])
++def test_collective_batch_validation(monkeypatch, defect):
++    from slime.backends.fsdp_utils import trainer as module
++
++    data = batch()
++    config = SimpleNamespace(use_rollout_logprobs=False)
++    monkeypatch.setattr(module.dist, "get_world_size", lambda: 2)
++    monkeypatch.setattr(module, "get_gloo_group", lambda: None)
++    def gather(output, value, group):
++        if value is None:
++            output[:] = [None, "bad remote token ID" if defect == "remote_error" else None]
++        else:
++            remote = deepcopy(value)
++            remote["partition"] = [2, 3]
++            remote["rollout_ids"] = [1, 1]
++            if defect == "overlap":
++                remote["partition"] = [0, 3]
++            elif defect == "denominator":
++                remote["rollout_mask_sums"] = [3, 3]
++            elif defect == "schedule":
++                remote["global_batch_sizes"] = [3]
++            output[:] = [value, remote]
++    data["global_batch_sizes"] = [2]
++    monkeypatch.setattr(module.dist, "all_gather_object", gather)
++    if defect:
++        with pytest.raises(ValueError):
++            module.collective_validate(data, config, 5)
++    else:
++        module.collective_validate(data, config, 5)
++
++
++def builder_args():
++    return SimpleNamespace(custom_reward_post_process_path=None, custom_convert_samples_to_train_data_path=None,
++                           advantage_estimator="grpo", rewards_normalization=True, grpo_std_normalization=True,
++                           reward_key=None, rollout_batch_size=2, n_samples_per_prompt=4, rollout_top_p=1.0)
++
++
++def test_real_batch_builder_normalizes_unique_rollouts_once():
++    from slime.data.batch_builder import BatchBuilder
++    from slime.backends.fsdp_utils.grpo_fixture import fixed_samples
++
++    samples = fixed_samples()
++    data = BatchBuilder(builder_args()).convert(samples)
++    raw = torch.tensor([1.0, 0.0, 0.5, 1.5])
++    normalized = (raw - raw.mean()) / (raw.std() + 1e-6)
++    torch.testing.assert_close(torch.tensor(data["rewards"][:8]), normalized.repeat_interleave(torch.tensor([3, 1, 2, 2])))
++    assert not any(data["loss_masks"][1])
++    assert data["rollout_mask_sums"][0] == data["rollout_mask_sums"][1] == data["rollout_mask_sums"][2]
++    assert data["rollout_mask_sums"][0] == sum(data["loss_masks"][0]) + sum(data["loss_masks"][2])
++    assert data["truncated"][-1] == 1
++    for sample in samples:
++        sample.reward = 1.0
++    assert BatchBuilder(builder_args()).convert(samples)["rewards"] == [0.0] * len(samples)
++    assert BatchBuilder(builder_args()).convert(samples[:1])["rewards"] == [0.0]
++
++
++@pytest.mark.parametrize("supplied", [False, True])
++def test_old_policy_is_frozen_across_steps_and_optimizer_persists(monkeypatch, supplied):
++    from slime.backends.fsdp_utils import trainer as module
++
++    model = torch.nn.Linear(1, 1, bias=False)
++    model.weight.data.zero_()
++    model.config = SimpleNamespace(vocab_size=5)
++    instance = module.GRPOTrainer.__new__(module.GRPOTrainer)
++    instance.model = instance.turbo = model
++    instance.args = args()
++    instance.args.use_rollout_logprobs = supplied
++    instance.args.clip_grad = 0
++    instance.args.lr = 0.1
++    instance.optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
++    instance.optimizer_steps = 0
++    calls = []
++    def forward(data, indices):
++        calls.append(torch.is_grad_enabled())
++        return [model.weight.flatten().expand(data["response_lengths"][i]) for i in indices]
++    instance._forward = forward
++    monkeypatch.setattr(module, "collective_validate", lambda *unused: None)
++    monkeypatch.setattr(module, "clip_sharded_gradients", lambda *unused: 1.0)
++    monkeypatch.setattr(module.accelerator, "device", lambda: "cpu")
++    monkeypatch.setattr(module.dist, "get_world_size", lambda: 1)
++    monkeypatch.setattr(module.dist, "all_reduce", lambda *unused: None)
++    data = batch()
++    data.update(rollout_ids=[0, 1], rollout_mask_sums=[1, 1], num_microbatches=[1, 1], global_batch_sizes=[1, 1])
++    if supplied:
++        data["rollout_log_probs"] = [torch.zeros(2), torch.zeros(1)]
++    result = instance.train_batch(0, data)
++    assert result["optimizer_steps"] == 2
++    assert calls == ([True, True] if supplied else [False, False, True, True])
++    assert result["steps"][0]["loss"] == pytest.approx(-1)
++    assert result["steps"][1]["loss"] == pytest.approx(-torch.exp(torch.tensor(0.1)).item())
++    assert model.weight.item() == pytest.approx(0.1 + 0.1 * torch.exp(torch.tensor(0.1)).item())
+diff --git a/train.py b/train.py
+index 463524ca..9c71dd0b 100644
+--- a/train.py
++++ b/train.py
+@@ -101,7 +101,7 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
+ 
+ def main(args, restore_plan):
+     """Own the attempt's exit policy; actors only clean up their own resources."""
+-    if getattr(args, "fsdp_init_only", False) or getattr(args, "fsdp_model_check", False):
++    if any(getattr(args, mode, False) for mode in ("fsdp_init_only", "fsdp_model_check", "fsdp_grpo_check")):
+         from slime.backends.fsdp_utils.preflight import run_initialization_check
+ 
+         run_initialization_check(args)
+-- 
+2.54.0
+
