@@ -84,6 +84,16 @@ base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
 sha256 = "c310eb97a6bd3b58b8f34832dd23b90cb5ebed958de60f74664a9124b78ec215"
 
 [[patches]]
+id = "slime:features:fsdpturbo-qwen3-model"
+category = "features"
+target = "slime"
+file = "0002-fsdpturbo-qwen3-model.patch"
+summary = "Qwen3 model loading, FSDPTurbo native FSDP2 wrapping and two-rank numerical validation"
+issue = "local:fsdpturbo-model-milestone"
+base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
+sha256 = "28f7dd1844100633b00742f137321c12ec87909543e7b7719cb641dcde696837"
+
+[[patches]]
 id = "mbridge:npu-device"
 category = "third_party"
 target = "mbridge"

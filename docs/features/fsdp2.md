@@ -1,15 +1,17 @@
-# FSDPTurbo 后端适配：初始化阶段
+# FSDPTurbo 后端适配：初始化与模型验证
 
 本交付实现 FSDP 参数入口、训练 Actor 选择、独立 Python 环境、双卡通信与资源释放。
-当前必须传入 `--fsdp-init-only`，尚未加载模型、计算 GRPO loss、启动推理生成或同步权重。
-这不是完整 FSDP 训练后端；下一阶段接入 Qwen3-0.6B 的模型包装和前后向。
+选择 `--fsdp-init-only` 验证初始化，或 `--fsdp-model-check` 验证 Qwen3-0.6B
+模型加载、FSDP2 分片、前后向和一次 AdamW 更新。模型阶段详见 [模型验收](fsdp2-model.md)。
+目前仍未接入 GRPO loss、推理生成、权重同步或 checkpoint 保存。
 
 ## 代码维护与构建
 
 外层 slime-ascend 是交付仓库，`slime/` 是固定上游提交应用补丁后的运行代码。
 `patches/features/0001-fsdpturbo-backend-entry.patch` 包含入口、Actor、预检和单测。
+`patches/features/0002-fsdpturbo-qwen3-model.patch` 在其后添加模型加载、分片及数值验收。
 `patches/npu-compat/bounded-port-search.patch` 单独保存现有基线需要的端口查找修复。
-两者由 `patches/MANIFEST.toml` 注册并校验 SHA256；`build.sh` 按
+补丁由 `patches/MANIFEST.toml` 注册并校验 SHA256；`build.sh` 按
 `npu-compat`、`upstream-fixes`、`features` 顺序应用，每类内遵循清单顺序。
 不要仅提交子模块指针：功能源码通过补丁交付，环境脚本、示例和本文直接由外层仓库维护。
 
