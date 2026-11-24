@@ -1,0 +1,721 @@
+From 8425e03daf03bf0a65b41ae5616bcb4daffc67bb Mon Sep 17 00:00:00 2001
+From: WBiXin <wangbingxuan@huawei.com>
+Date: Sun, 22 Nov 2026 22:23:29 +0800
+Subject: [PATCH] Add FSDPTurbo synchronous training and joint data checkpoint
+ resume
+
+---
+ slime/backends/fsdp_utils/actor.py     |  10 +-
+ slime/backends/fsdp_utils/arguments.py |  51 ++++--
+ slime/backends/fsdp_utils/resume.py    | 209 +++++++++++++++++++++++++
+ slime/data/checkpoint.py               |  11 +-
+ slime/ray/actor_group.py               |   2 +-
+ slime/ray/placement_group.py           |   7 +
+ tests/test_fsdp_resume.py              | 181 +++++++++++++++++++++
+ train.py                               |  19 ++-
+ 8 files changed, 473 insertions(+), 17 deletions(-)
+ create mode 100644 slime/backends/fsdp_utils/resume.py
+ create mode 100644 tests/test_fsdp_resume.py
+
+diff --git a/slime/backends/fsdp_utils/actor.py b/slime/backends/fsdp_utils/actor.py
+index bd91dff5..83f81a05 100644
+--- a/slime/backends/fsdp_utils/actor.py
++++ b/slime/backends/fsdp_utils/actor.py
+@@ -102,7 +102,7 @@ class FSDPTrainRayActor(TrainRayActor):
+         from slime.backends.fsdp_utils.trainer import GRPOTrainer
+         from slime.utils.data import process_rollout_data
+ 
+-        if not (self.args.fsdp_grpo_check or self.args.fsdp_online_check or getattr(self.args, "fsdp_checkpoint_check", False)) or external_data is not None:
++        if not (self.args.fsdp_grpo_check or self.args.fsdp_online_check or getattr(self.args, "fsdp_checkpoint_check", False) or getattr(self.args, "fsdp_sync_train", False)) or external_data is not None:
+             raise ValueError("FSDP train currently supports the fixed GRPO check without external data")
+         data = process_rollout_data(rollout_data_ref, self._rank, self._world_size)
+         if self.grpo_trainer is None:
+@@ -140,7 +140,7 @@ class FSDPTrainRayActor(TrainRayActor):
+         from slime.backends.fsdp_utils.trainer import GRPOTrainer
+         from slime.backends.fsdp_utils.weight_sync import export_weights
+ 
+-        if not self.args.fsdp_online_check:
++        if not (self.args.fsdp_online_check or getattr(self.args, "fsdp_sync_train", False)):
+             raise ValueError("Weight publication requires --fsdp-online-check")
+         if self.grpo_trainer is None:
+             self.grpo_trainer = GRPOTrainer(self.args)
+@@ -148,6 +148,12 @@ class FSDPTrainRayActor(TrainRayActor):
+         self.weight_version += 1
+         return report
+ 
++    def training_progress(self):
++        trainer = self.grpo_trainer
++        return {"rank": self._rank, "pid": os.getpid(), "weight_version": self.weight_version,
++                "optimizer_steps": trainer.optimizer_steps if trainer else 0,
++                "last_rollout_id": trainer.last_rollout_id if trainer else None}
++
+     def sleep(self, tags=None):
+         raise NotImplementedError("FSDP offload is not supported")
+ 
+diff --git a/slime/backends/fsdp_utils/arguments.py b/slime/backends/fsdp_utils/arguments.py
+index b5878992..06c6beb9 100644
+--- a/slime/backends/fsdp_utils/arguments.py
++++ b/slime/backends/fsdp_utils/arguments.py
+@@ -13,11 +13,12 @@ def validate_fsdp_args(args):
+     grpo_check = getattr(args, "fsdp_grpo_check", False)
+     online_check = getattr(args, "fsdp_online_check", False)
+     checkpoint_check = getattr(args, "fsdp_checkpoint_check", False)
+-    if not args.fsdp_init_only and not model_check and not grpo_check and not online_check and not checkpoint_check:
+-        raise ValueError("Choose --fsdp-init-only, --fsdp-model-check or --fsdp-grpo-check; online training is not implemented yet")
++    sync_train = getattr(args, "fsdp_sync_train", False)
++    if not args.fsdp_init_only and not model_check and not grpo_check and not online_check and not checkpoint_check and not sync_train:
++        raise ValueError("Unrestricted FSDP training is not implemented; choose a check mode or --fsdp-sync-train")
+     if args.fsdp_init_report is None:
+         raise ValueError("FSDP checks require --fsdp-init-report")
+-    if model_check or grpo_check or online_check or checkpoint_check:
++    if model_check or grpo_check or online_check or checkpoint_check or sync_train:
+         if args.actor_num_gpus_per_node != 2:
+             raise ValueError("--fsdp-model-check requires exactly two training devices")
+         if not args.hf_checkpoint or not (Path(args.hf_checkpoint) / "config.json").is_file():
+@@ -40,16 +41,18 @@ def validate_fsdp_args(args):
+         "debug_rollout_only", "load", "save", "save_hf", "custom_config_path", "load_debug_rollout_data",
+     ):
+         if getattr(args, name, None):
++            if sync_train and name in ("load", "save"):
++                continue
+             raise ValueError(f"--{name.replace('_', '-')} is not supported by the FSDP initialization stage")
+     if args.rollout_data_transport != "object-store":
+         raise ValueError("FSDP currently requires --rollout-data-transport object-store")
+     if args.update_weight_mode != "full":
+         raise ValueError("FSDP currently supports only full weight updates")
+-    if grpo_check or online_check or checkpoint_check:
++    if grpo_check or online_check or checkpoint_check or sync_train:
+         validate_grpo_args(args)
+     checkpoint_save = getattr(args, "fsdp_checkpoint_save", None)
+     checkpoint_load = getattr(args, "fsdp_checkpoint_load", None)
+-    if checkpoint_save or checkpoint_load or checkpoint_check:
++    if (checkpoint_save or checkpoint_load or checkpoint_check) and not sync_train:
+         if not checkpoint_check:
+             raise ValueError("Trainer checkpoint save/load currently requires --fsdp-checkpoint-check")
+         if not checkpoint_save:
+@@ -62,24 +65,41 @@ def validate_fsdp_args(args):
+             raise ValueError("Checkpoint fixture recomputes actor logprobs")
+         if (args.rollout_batch_size, args.n_samples_per_prompt, args.global_batch_size, args.micro_batch_size) != (2, 4, 4, 2):
+             raise ValueError("Checkpoint fixture requires batch sizes 2/4/4/2")
+-    if online_check:
++    if online_check or sync_train:
+         if args.update_weight_transport != "disk" or not args.update_weight_disk_dir:
+             raise ValueError("FSDP online check requires disk weight transport and --update-weight-disk-dir")
+         if not args.update_weight_disk_keep_files or args.flush_cache_interval != 1:
+             raise ValueError("FSDP online check requires retained snapshots and flush-cache-interval=1")
+         if args.rollout_num_gpus != 2 or args.rollout_num_gpus_per_engine != 2 or args.num_gpus_per_node != 4:
+             raise ValueError("FSDP online check requires two training and two serving devices (one TP2 engine)")
+-        if args.num_rollout != 2 or not args.prompt_data or args.debug_train_only:
++        if (not sync_train and args.num_rollout != 2) or not args.prompt_data or args.debug_train_only:
+             raise ValueError("FSDP online check requires num-rollout=2, prompt-data and live serving")
+         for name in ("rollout_external", "sglang_config", "update_weight_local_checkpoint_dir",
+                      "custom_update_weight_post_write_path", "eval_interval", "save_interval", "ci_test",
+                      "prefill_num_servers", "sglang_quantization", "use_rollout_logprobs"):
+             if getattr(args, name, None):
++                if sync_train and name == "save_interval":
++                    continue
+                 raise ValueError(f"{name} is not supported by the FSDP online check")
+         if args.rollout_function_path != "slime.rollout.sglang_rollout.generate_rollout":
+             raise ValueError("FSDP online check requires synchronous SGLang rollout")
+         if args.rollout_top_k != -1 or args.sglang_dp_size != 1 or args.sglang_pp_size != 1:
+             raise ValueError("FSDP online check requires untruncated sampling and a single TP2 engine")
++    if sync_train:
++        if not args.save or not args.save_interval or args.save_interval < 1 or not args.num_rollout or args.num_rollout < 1:
++            raise ValueError("FSDP synchronous training requires --save, positive --save-interval and --num-rollout")
++        if not Path(args.prompt_data).is_file():
++            raise ValueError("FSDP synchronous resume requires one local prompt-data file")
++        if args.data_source_path not in (None, "slime.data.data_source.RolloutDataSourceWithBuffer"):
++            raise ValueError("FSDP synchronous resume requires the built-in data source")
++        if args.over_sampling_batch_size not in (None, args.rollout_batch_size):
++            raise ValueError("FSDP synchronous resume requires over-sampling-batch-size=rollout-batch-size")
++        for name in ("partial_rollout", "dynamic_sampling_filter_path", "custom_generate_function_path",
++                     "custom_rm_path", "custom_rollout_function_path", "rollout_sample_filter_path", "buffer_filter_path",
++                     "rollout_sample_hook_path",
++                     "multimodal_keys", "use_critic", "no_load_optim", "no_load_rng", "no_save_optim", "no_save_rng"):
++            if getattr(args, name, None):
++                raise ValueError(f"{name} is not supported by FSDP synchronous resume")
+ 
+ 
+ def validate_grpo_args(args):
+@@ -125,6 +145,7 @@ def parse_fsdp_args(extra_args_provider):
+     parser = extra_args_provider(argparse.ArgumentParser(allow_abbrev=False))
+     parser.add_argument("--train-backend", choices=["fsdp"], default="fsdp")
+     parser.add_argument("--fsdp-provider", choices=["fsdpturbo"], default="fsdpturbo")
++    parser.add_argument("--ckpt-step", type=int, help="Explicit saved rollout ID for synchronous resume")
+     parser.add_argument("--fsdp-python-executable", required=True)
+     mode = parser.add_mutually_exclusive_group()
+     mode.add_argument("--fsdp-init-only", action="store_true")
+@@ -136,6 +157,8 @@ def parse_fsdp_args(extra_args_provider):
+                       help="Validate two real SGLang rollouts, GRPO updates and full disk weight synchronization")
+     mode.add_argument("--fsdp-checkpoint-check", action="store_true",
+                       help="Validate trainer save/restore and exact continuation using a fixed GRPO batch")
++    mode.add_argument("--fsdp-sync-train", action="store_true",
++                      help="Run Slime synchronous GRPO with joint trainer/data checkpoints and cold restart")
+     parser.add_argument("--fsdp-checkpoint-save", type=Path,
+                         help="Training checkpoint root, separate from HF inference snapshots")
+     parser.add_argument("--fsdp-checkpoint-load", type=Path,
+@@ -151,18 +174,26 @@ def parse_fsdp_args(extra_args_provider):
+     parser.set_defaults(num_rollout=0, rollout_batch_size=2, n_samples_per_prompt=4,
+                         global_batch_size=8, advantage_estimator="grpo", kl_loss_coef=0.0,
+                         fp16=False, bf16=True)
+-    if "--fsdp-online-check" in sys.argv:
++    if "--fsdp-online-check" in sys.argv or "--fsdp-sync-train" in sys.argv:
+         from slime.backends.sglang_utils.arguments import add_sglang_arguments
+ 
+         parser = add_sglang_arguments(parser)
+     args = parser.parse_args()
++    if args.fsdp_sync_train and (args.fsdp_checkpoint_save or args.fsdp_checkpoint_load):
++        raise ValueError("Use --save/--load checkpoint roots with --fsdp-sync-train")
++    requested_start = args.start_rollout_id
+     validate_fsdp_args(args)
+     # The initialization check owns no rollout engines or checkpoint state.
+-    args.debug_train_only = not args.fsdp_online_check
++    args.debug_train_only = not (args.fsdp_online_check or args.fsdp_sync_train)
+     args, restore_plan = slime_validate_args(args)
+-    if args.fsdp_online_check:
++    if args.fsdp_online_check or args.fsdp_sync_train:
+         from slime.backends.sglang_utils.arguments import validate_args as validate_sglang_args
+ 
+         validate_sglang_args(args)
+     validate_fsdp_args(args)
++    if args.fsdp_sync_train:
++        from .resume import resolve
++
++        args.start_rollout_id = requested_start
++        resolve(args)
+     return args, restore_plan
+diff --git a/slime/backends/fsdp_utils/resume.py b/slime/backends/fsdp_utils/resume.py
+new file mode 100644
+index 00000000..ae23067e
+--- /dev/null
++++ b/slime/backends/fsdp_utils/resume.py
+@@ -0,0 +1,209 @@
++"""Driver-side commit of a synchronous trainer checkpoint and Slime data cursor.
++
++The existing RolloutDataSource owns cursor serialization. This module only binds
++its output to the trainer's committed directory and selects complete boundaries.
++"""
++
++import hashlib
++import json
++import os
++import tempfile
++from pathlib import Path
++
++
++FORMAT = "slime-fsdpturbo-object-store-v1"
++LATEST = "fsdp_latest.json"
++DATA_FIELDS = ("input_key", "label_key", "metadata_key", "tool_key", "multimodal_keys",
++               "apply_chat_template", "apply_chat_template_kwargs", "rollout_seed", "rollout_shuffle",
++               "rollout_max_prompt_len", "rollout_batch_size", "n_samples_per_prompt", "data_source_path",
++               "rollout_function_path", "rm_type", "reward_key", "rollout_temperature", "rollout_top_p",
++               "rollout_top_k", "rollout_max_response_len", "rollout_max_context_len", "rollout_stop",
++               "rollout_stop_token_ids", "rollout_skip_special_tokens", "rollout_keep_special_tokens")
++
++
++def record(path):
++    with Path(path).open("rb") as stream:
++        return {"size": os.fstat(stream.fileno()).st_size,
++                "sha256": hashlib.file_digest(stream, "sha256").hexdigest()}
++
++
++def data_signature(args):
++    # Initial synchronous support deliberately uses one local dataset, without
++    # slicing/globbing, custom hooks or background/partial rollout producers.
++    dataset = Path(args.prompt_data)
++    model = Path(args.hf_checkpoint)
++    tokenizer = {name: record(model / name) for name in
++                 ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "special_tokens_map.json")
++                 if (model / name).is_file()}
++    value = {"dataset": record(dataset), "tokenizer": tokenizer,
++             "fields": {key: getattr(args, key, None) for key in DATA_FIELDS}}
++    return json.loads(json.dumps(value, sort_keys=True))
++
++
++def atomic_json(path, value, *, replace=False):
++    path = Path(path)
++    path.parent.mkdir(parents=True, exist_ok=True)
++    if path.exists() and not replace:
++        raise FileExistsError(f"Refusing to overwrite checkpoint boundary: {path}")
++    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
++    try:
++        with os.fdopen(fd, "w") as stream:
++            json.dump(value, stream, indent=2)
++            stream.write("\n")
++            stream.flush()
++            os.fsync(stream.fileno())
++        if replace:
++            os.replace(temporary, path)
++        else:
++            # Exclusive publication also rejects concurrent writers.
++            os.link(temporary, path)
++        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
++        try:
++            os.fsync(directory)
++        finally:
++            os.close(directory)
++    finally:
++        if os.path.exists(temporary):
++            os.unlink(temporary)
++
++
++def boundary_path(root, rollout_id):
++    return Path(root) / "rollout" / f"fsdp_committed_{rollout_id:07d}.json"
++
++
++def prepare_save(args, rollout_id):
++    root = Path(args.save)
++    for path in (boundary_path(root, rollout_id), root / f"iter_{rollout_id:07d}",
++                 root / "rollout" / f"global_dataset_state_dict_{rollout_id}.pt"):
++        if path.exists():
++            raise FileExistsError(f"Checkpoint output already exists: {path}; use a new --save directory")
++
++
++def cursor_summary(path):
++    import torch
++
++    # This is Slime's existing trusted local dataset state format (it may hold
++    # Sample objects); validate hashes before calling during restoration.
++    state = torch.load(path, map_location="cpu", weights_only=False)
++    keys = ("epoch_id", "sample_offset", "sample_group_index", "sample_index")
++    if not isinstance(state, dict) or any(type(state.get(key)) is not int or state[key] < 0 for key in keys):
++        raise ValueError("Invalid dataset cursor")
++    if state.get("buffer") or state.get("consumers"):
++        raise ValueError("Synchronous FSDP resume does not support buffered or background rollout state")
++    return {key: state[key] for key in keys}
++
++
++def commit(args, rollout_id, weight_version):
++    root = Path(args.save)
++    model_name = f"iter_{rollout_id:07d}/COMMITTED.json"
++    cursor_name = f"rollout/global_dataset_state_dict_{rollout_id}.pt"
++    model = json.loads((root / model_name).read_text())
++    if (model.get("format") != "slime-fsdpturbo-training-v1" or model.get("rollout_id") != rollout_id
++            or model.get("next_rollout_id") != rollout_id + 1 or model.get("weight_version") != weight_version):
++        raise ValueError("Trainer checkpoint does not match the data/weight boundary")
++    if data_signature(args) != args.fsdp_data_signature:
++        raise ValueError("Dataset or tokenizer changed during training")
++    files = {name: record(root / name) for name in (model_name, cursor_name)}
++    for name in files:
++        with (root / name).open("rb") as stream:
++            os.fsync(stream.fileno())
++    value = {"format": FORMAT, "rollout_id": rollout_id, "next_rollout_id": rollout_id + 1,
++             "optimizer_steps": model["optimizer_steps"], "weight_version": weight_version,
++             "data_signature": args.fsdp_data_signature, "files": files,
++             "cursor": cursor_summary(root / cursor_name)}
++    atomic_json(boundary_path(root, rollout_id), value)
++    atomic_json(root / LATEST, {"format": FORMAT, "rollout_id": rollout_id}, replace=True)
++    return value
++
++
++def read_boundary(root, step, expected_signature):
++    root = Path(root)
++    if step is None:
++        latest = json.loads((root / LATEST).read_text())
++        if latest.get("format") != FORMAT:
++            raise ValueError("Not an FSDP object-store checkpoint root")
++        step = latest["rollout_id"]
++    if type(step) is not int or step < 0:
++        raise ValueError("Invalid checkpoint rollout ID")
++    value = json.loads(boundary_path(root, step).read_text())
++    if (value.get("format") != FORMAT or value.get("rollout_id") != step
++            or value.get("next_rollout_id") != step + 1 or value.get("data_signature") != expected_signature):
++        raise ValueError("Checkpoint data configuration or training boundary mismatch")
++    names = {f"iter_{step:07d}/COMMITTED.json", f"rollout/global_dataset_state_dict_{step}.pt"}
++    if set(value.get("files", {})) != names:
++        raise ValueError("Incomplete joint checkpoint manifest")
++    for name in names:
++        path = root / name
++        if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()) or record(path) != value["files"][name]:
++            raise ValueError(f"Checkpoint component missing or corrupted: {name}")
++    model = json.loads((root / f"iter_{step:07d}/COMMITTED.json").read_text())
++    for key in ("rollout_id", "next_rollout_id", "optimizer_steps", "weight_version"):
++        if type(value.get(key)) is not int or value[key] < 0 or value[key] != model.get(key):
++            raise ValueError(f"Joint/model checkpoint progress mismatch: {key}")
++    if value["optimizer_steps"] <= 0 or cursor_summary(root / f"rollout/global_dataset_state_dict_{step}.pt") != value["cursor"]:
++        raise ValueError("Invalid model step or data cursor")
++    return value
++
++
++def resolve(args):
++    """Select only an explicit complete boundary, never silently start from HF."""
++    args.fsdp_data_signature = data_signature(args)
++    if args.load:
++        value = read_boundary(args.load, args.ckpt_step, args.fsdp_data_signature)
++        if args.start_rollout_id not in (None, value["next_rollout_id"]):
++            raise ValueError("--start-rollout-id differs from saved checkpoint")
++        args.ckpt_step = value["rollout_id"]
++        args.start_rollout_id = value["next_rollout_id"]
++        args.fsdp_checkpoint_load = Path(args.load) / f"iter_{args.ckpt_step:07d}"
++        args.update_weight_start_version = value["weight_version"]
++    else:
++        if args.ckpt_step is not None or args.start_rollout_id not in (None, 0):
++            raise ValueError("Starting after rollout zero requires --load")
++        args.start_rollout_id = 0
++        args.update_weight_start_version = 0
++    if args.num_rollout <= args.start_rollout_id:
++        raise ValueError("--num-rollout is a total count and must exceed restored progress")
++    args.fsdp_checkpoint_save = Path(args.save)
++    # Do not overwrite incomplete or later checkpoints when rewinding a job.
++    if Path(args.save).exists():
++        for path in Path(args.save).glob("iter_*"):
++            if path.name.removeprefix("iter_").isdigit() and int(path.name[5:]) >= args.start_rollout_id:
++                raise ValueError("Save directory contains this or later rollouts; choose a new --save directory")
++    # Saving precedes the normal post-train weight publication. A prior attempt
++    # may have already published a later version: allocate beyond every file,
++    # retaining no-overwrite semantics even when rolling back a checkpoint.
++    weights = Path(args.update_weight_disk_dir)
++    versions = [int(p.name[8:]) for p in weights.glob("weight_v*") if p.name[8:].isdigit()]
++    args.update_weight_start_version = max([args.update_weight_start_version, *versions])
++
++
++class SyncReport:
++    """Small durable audit of the existing main loop, including failed attempts."""
++
++    def __init__(self, args, group):
++        import ray
++
++        self.path = Path(args.fsdp_init_report)
++        self.value = {"passed": False, "driver_pid": os.getpid(), "start_rollout_id": args.start_rollout_id,
++                      "num_rollout": args.num_rollout, "load": args.load, "save": args.save,
++                      "initial_progress": ray.get([actor.training_progress.remote() for actor in group._actor_handlers]),
++                      "publications": [], "rollouts": []}
++        self.write()
++
++    def write(self):
++        atomic_json(self.path, self.value, replace=True)
++
++    def publish(self, publication):
++        self.value["publications"].append(publication)
++        self.write()
++
++    def trained(self, rollout_id, training):
++        self.value["rollouts"].append({"rollout_id": rollout_id, "training": training})
++        self.write()
++
++    def finish(self, group):
++        import ray
++
++        self.value["final_progress"] = ray.get([actor.training_progress.remote() for actor in group._actor_handlers])
++        self.value["passed"] = True
++        self.write()
+diff --git a/slime/data/checkpoint.py b/slime/data/checkpoint.py
+index 03b1eede..370bda61 100644
+--- a/slime/data/checkpoint.py
++++ b/slime/data/checkpoint.py
+@@ -51,7 +51,12 @@ def save_checkpoint(args, rollout_id, actor_model, critic_model, rollout_manager
+     recoverable = training_recovery_enabled(args)
+     # A recovery boundary must wait for async model writes to finish before it
+     # can declare earlier batches safe to discard.
+-    force_sync = straw_checkpoint or recoverable or args.release_train or rollout_id == args.num_rollout - 1
++    fsdp_sync = getattr(args, "fsdp_sync_train", False)
++    force_sync = fsdp_sync or straw_checkpoint or recoverable or args.release_train or rollout_id == args.num_rollout - 1
++    if fsdp_sync:
++        from slime.backends.fsdp_utils.resume import prepare_save
++
++        prepare_save(args, rollout_id)
+     if straw_checkpoint and (Path(args.save) / "rollout" / f"committed_{rollout_id}.json").exists():
+         raise FileExistsError("Refusing to overwrite a committed straw checkpoint")
+     if actor_trains:
+@@ -59,6 +64,10 @@ def save_checkpoint(args, rollout_id, actor_model, critic_model, rollout_manager
+     if args.use_critic:
+         critic_model.save_model(rollout_id, force_sync=force_sync)
+     ray.get(rollout_manager.save.remote(rollout_id))
++    if fsdp_sync:
++        from slime.backends.fsdp_utils.resume import commit
++
++        commit(args, rollout_id, actor_model._disk_weight_version)
+     if straw_checkpoint:
+         # Failed saves raise above; publish only after all saves return.
+         model_args = [actor_model.args]
+diff --git a/slime/ray/actor_group.py b/slime/ray/actor_group.py
+index c930c0c4..5b56263a 100644
+--- a/slime/ray/actor_group.py
++++ b/slime/ray/actor_group.py
+@@ -186,7 +186,7 @@ class RayTrainGroup:
+ 
+     def update_weights(self) -> None:
+         """Publish actor weights; disk reload is coordinated after all ranks save."""
+-        if getattr(self.args, "fsdp_online_check", False):
++        if getattr(self.args, "fsdp_online_check", False) or getattr(self.args, "fsdp_sync_train", False):
+             from slime.backends.fsdp_utils.publication import publish_to_engines
+ 
+             result = publish_to_engines(self)
+diff --git a/slime/ray/placement_group.py b/slime/ray/placement_group.py
+index 7f081201..7b352ec8 100644
+--- a/slime/ray/placement_group.py
++++ b/slime/ray/placement_group.py
+@@ -235,6 +235,8 @@ def create_training_models(args, pgs, rollout_manager, actor_cls=None):
+         start_rollout_ids = actor_start_rollout_ids
+ 
+     assert len(set(start_rollout_ids)) == 1
++    if getattr(args, "fsdp_sync_train", False) and start_rollout_ids[0] != args.start_rollout_id:
++        raise ValueError("Restored FSDP trainer progress differs from the selected data boundary")
+ 
+     if args.start_rollout_id is None:
+         args.start_rollout_id = start_rollout_ids[0]
+@@ -256,6 +258,9 @@ class RolloutStartup:
+     num_rollout_per_epoch: int | None = None
+ 
+     def close(self, *, failed):
++        # This first FSDP path supports a cold restart from a durable checkpoint.
++        if getattr(self.args, "fsdp_sync_train", False):
++            failed = False
+         timeout = getattr(self.args, "rollout_cleanup_timeout", 60)
+         with Cleanup(timeout) as cleanup:
+             if failed and self.serving is not None:
+@@ -362,6 +367,8 @@ def _attach_rollout_manager(startup):
+         # connections. Manager attachment restores the data/checkpoint boundary.
+         resume = ray.get(manager.attach_training.remote(args, deployment))
+         restore_plan, reused = resume.restore_plan, resume.reused
++        if reused and getattr(args, "fsdp_sync_train", False):
++            raise ValueError("FSDP synchronous resume requires a fresh serving session")
+         args = startup.args = resume.apply(args)
+         logger.info("%s serving session %s", "Reusing" if reused else "Created", name)
+     num_rollout_per_epoch = None
+diff --git a/tests/test_fsdp_resume.py b/tests/test_fsdp_resume.py
+new file mode 100644
+index 00000000..a6473b50
+--- /dev/null
++++ b/tests/test_fsdp_resume.py
+@@ -0,0 +1,181 @@
++import json
++import sys
++from types import SimpleNamespace
++
++import pytest
++import torch
++
++from slime.backends.fsdp_utils import resume
++
++
++def fixture(tmp_path, step=0):
++    dataset = tmp_path / 'data.jsonl'
++    dataset.write_text('{"prompt":"test"}\n')
++    model = tmp_path / 'hf'
++    model.mkdir(exist_ok=True)
++    (model / 'config.json').write_text('{"model_type":"qwen3"}')
++    (model / 'tokenizer.json').write_text('{}')
++    args = SimpleNamespace(save=str(tmp_path / 'ckpt'), load=None, ckpt_step=None,
++                           start_rollout_id=None, num_rollout=2, prompt_data=str(dataset),
++                           hf_checkpoint=str(model), update_weight_disk_dir=str(tmp_path / 'weights'))
++    args.fsdp_data_signature = resume.data_signature(args)
++    root = tmp_path / 'ckpt'
++    trainer = root / f'iter_{step:07d}'
++    trainer.mkdir(parents=True, exist_ok=True)
++    (trainer / 'COMMITTED.json').write_text(json.dumps({
++        'format': 'slime-fsdpturbo-training-v1', 'rollout_id': step, 'next_rollout_id': step + 1,
++        'optimizer_steps': step + 1, 'weight_version': step + 1}))
++    (root / 'rollout').mkdir(exist_ok=True)
++    torch.save({'epoch_id': 0, 'sample_offset': 2 * (step + 1), 'sample_group_index': 2 * (step + 1),
++                'sample_index': 8 * (step + 1), 'buffer': [], 'consumers': {}},
++               root / 'rollout' / f'global_dataset_state_dict_{step}.pt')
++    return args, root
++
++
++def test_joint_commit_and_version_collision_avoidance(tmp_path):
++    args, root = fixture(tmp_path)
++    value = resume.commit(args, 0, 1)
++    assert resume.read_boundary(root, None, args.fsdp_data_signature) == value
++    (tmp_path / 'weights/weight_v000002').mkdir(parents=True)
++    args.load = str(root)
++    resume.resolve(args)
++    assert args.start_rollout_id == 1 and args.ckpt_step == 0
++    assert args.update_weight_start_version == 2
++    assert args.fsdp_checkpoint_load == root / 'iter_0000000'
++
++
++@pytest.mark.parametrize('failure', ['no_boundary', 'no_data', 'corrupt_data', 'corrupt_model', 'dataset',
++                                    'tokenizer', 'wrong_progress', 'wrong_start', 'save_collision'])
++def test_incomplete_or_incompatible_resume_fails_closed(tmp_path, failure):
++    args, root = fixture(tmp_path)
++    resume.commit(args, 0, 1)
++    args.load = str(root)
++    if failure == 'no_boundary':
++        resume.boundary_path(root, 0).unlink()
++    elif failure == 'no_data':
++        (root / 'rollout/global_dataset_state_dict_0.pt').unlink()
++    elif failure == 'corrupt_data':
++        (root / 'rollout/global_dataset_state_dict_0.pt').write_bytes(b'broken')
++    elif failure == 'corrupt_model':
++        (root / 'iter_0000000/COMMITTED.json').write_text('{}')
++    elif failure == 'dataset':
++        (tmp_path / 'data.jsonl').write_text('changed')
++    elif failure == 'tokenizer':
++        (tmp_path / 'hf/tokenizer.json').write_text('changed')
++    elif failure == 'wrong_progress':
++        path = resume.boundary_path(root, 0)
++        value = json.loads(path.read_text())
++        value['optimizer_steps'] = 98
++        path.write_text(json.dumps(value))
++    elif failure == 'wrong_start':
++        args.start_rollout_id = 0
++    elif failure == 'save_collision':
++        (root / 'iter_0000001').mkdir()
++    with pytest.raises((OSError, ValueError)):
++        resume.resolve(args)
++
++
++def test_failed_tracker_keeps_previous_boundary(tmp_path, monkeypatch):
++    args, root = fixture(tmp_path)
++    resume.commit(args, 0, 1)
++    args, _ = fixture(tmp_path, step=1)
++    original = resume.atomic_json
++    def fail_latest(path, value, **kwargs):
++        if path.name == resume.LATEST:
++            raise OSError('interrupted before tracker publication')
++        original(path, value, **kwargs)
++    monkeypatch.setattr(resume, 'atomic_json', fail_latest)
++    with pytest.raises(OSError):
++        resume.commit(args, 1, 2)
++    assert resume.read_boundary(root, None, args.fsdp_data_signature)['rollout_id'] == 0
++    assert resume.read_boundary(root, 1, args.fsdp_data_signature)['rollout_id'] == 1
++    with pytest.raises(FileExistsError):
++        resume.prepare_save(args, 1)
++
++
++@pytest.mark.parametrize('component', ['model', 'cursor'])
++def test_incomplete_save_does_not_advance_tracker(tmp_path, component):
++    args, root = fixture(tmp_path)
++    target = root / ('iter_0000000/COMMITTED.json' if component == 'model' else 'rollout/global_dataset_state_dict_0.pt')
++    target.unlink()
++    with pytest.raises(OSError):
++        resume.commit(args, 0, 1)
++    assert not (root / resume.LATEST).exists()
++    assert not resume.boundary_path(root, 0).exists()
++
++
++@pytest.mark.parametrize('unsupported_hook', [False, True])
++def test_sync_parser_reuses_common_load_without_megatron(tmp_path, monkeypatch, unsupported_hook):
++    from slime.utils.arguments import parse_args
++
++    args, root = fixture(tmp_path)
++    argv = ['train.py', '--train-backend', 'fsdp', '--fsdp-sync-train',
++            '--fsdp-python-executable', sys.executable, '--fsdp-init-report', str(tmp_path / 'report.json'),
++            '--hf-checkpoint', args.hf_checkpoint, '--prompt-data', args.prompt_data,
++            '--save', str(tmp_path / 'save'), '--save-interval', '1', '--num-rollout', '1',
++            '--rollout-batch-size', '2',
++            '--actor-num-gpus-per-node', '2', '--num-gpus-per-node', '4', '--rollout-num-gpus', '2',
++            '--rollout-num-gpus-per-engine', '2', '--update-weight-transport', 'disk',
++            '--update-weight-disk-dir', args.update_weight_disk_dir, '--update-weight-disk-keep-files',
++            '--flush-cache-interval', '1', '--rollout-top-k', '-1', '--rollout-top-p', '1']
++    monkeypatch.setattr(sys, 'argv', argv)
++    if unsupported_hook:
++        argv += ['--rollout-sample-hook-path', 'custom.sample_hook']
++        with pytest.raises(ValueError, match='rollout_sample_hook_path'):
++            parse_args(return_restore_plan=True)
++        return
++    initial, _ = parse_args(return_restore_plan=True)
++    assert initial.start_rollout_id == 0
++    # Make the fake trainer/data files describe the actual parsed data options.
++    initial.save = str(root)
++    resume.commit(initial, 0, 1)
++    argv[argv.index('--num-rollout') + 1] = '2'
++    argv += ['--load', str(root)]
++    restored, _ = parse_args(return_restore_plan=True)
++    assert restored.start_rollout_id == 1
++    assert restored.fsdp_checkpoint_load == root / 'iter_0000000'
++    assert not any(name == 'megatron' or name.startswith('megatron.') for name in sys.modules)
++
++
++@pytest.mark.parametrize('shuffle', [False, True])
++def test_builtin_source_restores_next_groups_across_epoch(tmp_path, shuffle):
++    import random
++    from slime.data.data_source import RolloutDataSourceWithBuffer
++    from slime.utils.types import Sample
++
++    class Dataset:
++        def __init__(self):
++            self.original = [Sample(prompt=str(i)) for i in range(6)]
++            self.samples = list(self.original)
++        def shuffle(self, epoch):
++            self.samples = list(self.original)
++            random.Random(42 + epoch).shuffle(self.samples)
++        def __len__(self):
++            return len(self.samples)
++
++    def source():
++        # Use the actual source cursor/save/load and sample allocation code,
++        # replacing only tokenizer-backed dataset construction.
++        result = RolloutDataSourceWithBuffer.__new__(RolloutDataSourceWithBuffer)
++        result.args = SimpleNamespace(save=str(tmp_path), load=str(tmp_path), rollout_shuffle=shuffle, n_samples_per_prompt=4)
++        result.dataset = Dataset()
++        if shuffle:
++            result.dataset.shuffle(0)
++        result.sample_offset = result.epoch_id = result.sample_group_index = result.sample_index = 0
++        result.consumers = {}
++        result._restored_consumers = {}
++        result.metadata = {}
++        result.buffer = []
++        return result
++
++    original = source()
++    original.get_samples(4)
++    original.save(0)
++    expected = original.get_samples(4)
++    restored = source()
++    restored.load(0)
++    actual = restored.get_samples(4)
++    def ids(groups):
++        return [[(s.prompt, s.group_index, s.index) for s in group] for group in groups]
++    assert ids(actual) == ids(expected)
++    assert restored.state_dict() == original.state_dict()
+diff --git a/train.py b/train.py
+index a73872e7..83b8a4fd 100644
+--- a/train.py
++++ b/train.py
+@@ -14,12 +14,19 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
+     release_train = args.release_train
+ 
+     actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
++    sync_report = None
++    if getattr(args, "fsdp_sync_train", False):
++        from slime.backends.fsdp_utils.resume import SyncReport
++
++        sync_report = SyncReport(args, actor_model)
+ 
+     if args.offload_rollout and not release_train:
+         ray.get(rollout_manager.onload_weights.remote())
+ 
+     # Always push actor weights to rollout once weights are loaded.
+-    actor_model.update_weights()
++    publication = actor_model.update_weights()
++    if sync_report:
++        sync_report.publish(publication)
+     # Reattached async producers stay paused until restored weights are installed.
+     # This startup notification resumes them once, before entering the train loop.
+     ray.get(rollout_manager.training_ready.remote())
+@@ -64,7 +71,9 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
+             else:
+                 ray.get(value_refs)
+         else:
+-            ray.get(actor_model.async_train(rollout_id, rollout_data_ref))
++            training = ray.get(actor_model.async_train(rollout_id, rollout_data_ref))
++            if sync_report:
++                sync_report.trained(rollout_id, training)
+ 
+         # Runtime completion releases queue capacity, without claiming that the
+         # model/optimizer or this data progress have a durable joint checkpoint.
+@@ -86,7 +95,9 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
+         if args.offload_rollout and not release_train:
+             ray.get(rollout_manager.onload_weights.remote())
+         was_paused = ray.get(rollout_manager.pause_rollout_admission.remote())
+-        actor_model.update_weights()
++        publication = actor_model.update_weights()
++        if sync_report:
++            sync_report.publish(publication)
+         # Final evaluation uses the synchronized engines directly. Keep training
+         # producers paused when no later rollout will consume their new work.
+         if rollout_id + 1 < args.num_rollout:
+@@ -97,6 +108,8 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
+ 
+         if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):
+             ray.get(rollout_manager.eval.remote(rollout_id))
++    if sync_report:
++        sync_report.finish(actor_model)
+ 
+ 
+ def main(args, restore_plan):
+-- 
+2.54.0
+

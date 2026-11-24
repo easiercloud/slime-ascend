@@ -5,7 +5,8 @@
 模型加载、FSDP2 分片、前后向和一次 AdamW 更新。模型阶段详见 [模型验收](fsdp2-model.md)。
 `--fsdp-grpo-check` 接通固定 rollout 的数据读取、response log-prob、GRPO loss 和连续两次更新，
 详见 [GRPO 验收](fsdp2-grpo.md)。`--fsdp-online-check` 增加真实 SGLang 生成、
-GRPO 更新和 HF 磁盘权重同步，详见 [在线验收](fsdp2-online.md)。训练 actor 的 checkpoint 保存与恢复详见 [检查点验收](fsdp2-checkpoint.md)，在线数据源的整体恢复仍待接入。
+GRPO 更新和 HF 磁盘权重同步，详见 [在线验收](fsdp2-online.md)。训练 actor 的 checkpoint 保存与恢复详见 [检查点验收](fsdp2-checkpoint.md)。
+`--fsdp-sync-train` 接通原生同步主循环和训练/数据共同恢复，详见 [同步续训](fsdp2-sync-resume.md)。
 
 ## 代码维护与构建
 
@@ -15,6 +16,7 @@ GRPO 更新和 HF 磁盘权重同步，详见 [在线验收](fsdp2-online.md)。
 `patches/features/0003-fsdpturbo-grpo.patch` 添加固定 rollout 训练链路和 GRPO 数值验收。
 `patches/features/0004-fsdpturbo-online.patch` 添加 HF 权重发布和两轮真实 rollout 闭环验收。
 `patches/features/0005-fsdpturbo-checkpoint.patch` 添加分片训练状态保存、恢复与连续训练等价验收。
+`patches/features/0006-fsdpturbo-sync-resume.patch` 添加 object-store 同步训练、数据游标联合提交与冷启动续训。
 `patches/npu-compat/bounded-port-search.patch` 单独保存现有基线需要的端口查找修复。
 补丁由 `patches/MANIFEST.toml` 注册并校验 SHA256；`build.sh` 按
 `npu-compat`、`upstream-fixes`、`features` 顺序应用，每类内遵循清单顺序。
@@ -77,12 +79,13 @@ FSDPTurbo 自身注册可选 CUDA 算子时可能导入它，报告在 `optional
 ```bash
 PYTHONPATH="$PWD/slime${PYTHONPATH:+:$PYTHONPATH}" python -m pytest \
   slime/tests/test_fsdp_entry.py \
-  slime/tests/test_fsdp_model.py slime/tests/test_fsdp_grpo.py slime/tests/test_fsdp_weight_sync.py slime/tests/test_fsdp_checkpoint.py \
+  slime/tests/test_fsdp_model.py slime/tests/test_fsdp_grpo.py slime/tests/test_fsdp_weight_sync.py slime/tests/test_fsdp_checkpoint.py slime/tests/test_fsdp_resume.py \
   slime/tests/test_megatron_argument_validation.py \
   slime/tests/utils/test_sglang_arguments.py -q
 ```
 
 默认训练后端仍为 Megatron。FSDP 初始化拒绝 offload、同卡训练推理、PPO critic、
-reference/KL、OPD、容错、在线完整恢复、routing replay 等未实现组合。
+reference/KL、OPD、容错、routing replay 等未实现组合。
 在线检查限定单机 Qwen3、2 张训练卡加 2 张推理卡、两轮同步 GRPO，以及完整 BF16 磁盘发布。
-尚未开放任意长度常规训练、恢复训练、异步 rollout、多节点、增量同步或零拷贝同步。
+显式开启 `--fsdp-sync-train` 可运行同步训练并从完整的训练/数据边界冷启动续训；长期稳定性仍需验证。
+尚未开放异步 rollout、多节点、增量同步或零拷贝同步。

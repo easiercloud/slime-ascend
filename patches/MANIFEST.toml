@@ -124,6 +124,16 @@ base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
 sha256 = "48f608486749d1204ec00272456519eb813cd1728d9c1769a110238034d78f7e"
 
 [[patches]]
+id = "slime:features:fsdpturbo-sync-resume"
+category = "features"
+target = "slime"
+file = "0006-fsdpturbo-sync-resume.patch"
+summary = "Synchronous object-store training with joint trainer and data checkpoint resume"
+issue = "local:fsdpturbo-sync-resume-milestone"
+base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
+sha256 = "1bb3c578ac4d665fe77ff0e70c89bdea520d29702106dc7e9398c66694ffc374"
+
+[[patches]]
 id = "mbridge:npu-device"
 category = "third_party"
 target = "mbridge"
