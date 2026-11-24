@@ -1,0 +1,1280 @@
+From 2fb883581b3b590dc86b6a04814fa2411206b243 Mon Sep 17 00:00:00 2001
+From: yiweiyun <1223702268@qq.com>
+Date: Tue, 24 Nov 2026 05:07:54 +0800
+Subject: [PATCH] Audit FSDP2 precision and restore FP32 masters at inference
+ boundaries
+
+---
+ slime/backends/fsdp2_utils/actor.py           |  55 +-
+ slime/backends/fsdp2_utils/export.py          |  35 +-
+ slime/backends/fsdp2_utils/precision_audit.py | 684 ++++++++++++++++++
+ slime/ray/rollout.py                          |  16 +-
+ slime/utils/fsdp2_arguments.py                |  11 +-
+ tests/fsdp2/test_precision_audit.py           | 286 ++++++++
+ 6 files changed, 1075 insertions(+), 12 deletions(-)
+ create mode 100644 slime/backends/fsdp2_utils/precision_audit.py
+ create mode 100644 tests/fsdp2/test_precision_audit.py
+
+diff --git a/slime/backends/fsdp2_utils/actor.py b/slime/backends/fsdp2_utils/actor.py
+index 12fbee19..441d663f 100644
+--- a/slime/backends/fsdp2_utils/actor.py
++++ b/slime/backends/fsdp2_utils/actor.py
+@@ -1,8 +1,10 @@
+ """Minimal Slime Ray actor for dense random-initialized Qwen3 FSDP8 GRPO."""
+ 
++from contextlib import nullcontext
+ import importlib.metadata
+ import json
+ import math
++import os
+ from pathlib import Path
+ import subprocess
+ 
+@@ -15,7 +17,7 @@ from slime.utils import accelerator
+ from slime.utils.data import process_rollout_data
+ from slime.utils.distributed_utils import get_gloo_group
+ 
+-from .export import write_export
++from .export import reshard_to_master_shards, write_export
+ from .loss import backward_scale, grpo_contribution, response_log_probs
+ 
+ 
+@@ -83,6 +85,15 @@ class FSDP2TrainRayActor(TrainRayActor):
+         self.weight_version = int(getattr(args, "update_weight_start_version", -1))
+         self.step = 0
+         self.step_records = []
++        self._precision_audit = None
++        if (os.environ.get("SLIME_FSDP2_OPERATOR_AUDIT") == "1"
++                or os.environ.get("SLIME_FSDP2_LOGPROB_TOLERANCE_FILE")) and os.environ.get("SLIME_FSDP2_PRECISION_AUDIT") != "1":
++            raise ValueError("Operator/logprob precision gates require SLIME_FSDP2_PRECISION_AUDIT=1")
++        if os.environ.get("SLIME_FSDP2_PRECISION_AUDIT") == "1":
++            from .precision_audit import ActorPrecisionAudit
++
++            self._precision_audit = ActorPrecisionAudit(self.hf_model, self.optimizer, args,
++                                                       self.data_rank, self.data_world_size)
+         print(json.dumps({"backend": "fsdp2", "data_domain": self.data_world_size,
+                           "rank": self.data_rank, "mesh": list(self.watched.device_mesh.shape),
+                           "placements": [str(x) for x in self.watched.placements],
+@@ -96,9 +107,11 @@ class FSDP2TrainRayActor(TrainRayActor):
+         tokens = torch.nn.utils.rnn.pad_sequence(samples, batch_first=True, padding_value=0)
+         attention_mask = torch.arange(tokens.shape[1], device=self.device)[None, :] < torch.tensor(
+             lengths, device=self.device)[:, None]
+-        logits = self.model(input_ids=tokens, attention_mask=attention_mask, use_cache=False).logits
+-        return response_log_probs(logits, tokens, lengths, [data["response_lengths"][i] for i in indices],
+-                                  temperature=self.args.rollout_temperature)
++        observation = self._precision_audit.forward_observation() if self._precision_audit is not None else nullcontext()
++        with observation:
++            logits = self.model(input_ids=tokens, attention_mask=attention_mask, use_cache=False).logits
++            return response_log_probs(logits, tokens, lengths, [data["response_lengths"][i] for i in indices],
++                                      temperature=self.args.rollout_temperature)
+ 
+     def _validate_data(self, data):
+         # Coordinate validation errors before any FSDP collective. A bad rank
+@@ -157,6 +170,8 @@ class FSDP2TrainRayActor(TrainRayActor):
+         data = process_rollout_data(rollout_data_ref, self.data_rank, self.data_world_size)
+         self._validate_data(data)
+         schedules = data["micro_batch_indices"]
++        if self._precision_audit is not None:
++            self._precision_audit.begin_step(rollout_id, self.weight_version)
+         # Slime's default old policy is a snapshot before ANY optimizer update.
+         # Keep it fixed over the whole batch and all accumulation microbatches.
+         self.model.eval()
+@@ -167,24 +182,34 @@ class FSDP2TrainRayActor(TrainRayActor):
+         else:
+             old = [None] * len(data["tokens"])
+             with torch.no_grad():
+-                for indices in schedules:
++                for microbatch, indices in enumerate(schedules):
++                    if self._precision_audit is not None:
++                        self._precision_audit.phase(f"step{self.step + 1:02d}_old_mb{microbatch:02d}")
+                     for index, value in zip(indices, self._forward(data, indices), strict=True):
+                         old[index] = value.detach().cpu()
+         # Qwen first-pass dropout is zero; eval keeps snapshot/current paths
+         # deterministic while retaining autograd and FSDP pre-backward hooks.
++        reshard_to_master_shards(self.hf_model)
+         self.optimizer.zero_grad(set_to_none=True)
+         before = self.watched.to_local().detach().clone()
+         local_loss = torch.zeros((), device=self.device)
+         local_clip = torch.zeros((), device=self.device)
+-        for indices in schedules:
++        for microbatch, indices in enumerate(schedules):
++            if self._precision_audit is not None:
++                self._precision_audit.phase(f"step{self.step + 1:02d}_current_mb{microbatch:02d}")
++            current = self._forward(data, indices)
++            if self._precision_audit is not None:
++                self._precision_audit.observe_logprobs(current, old, data, indices, microbatch, self.step + 1)
+             contribution, clipped = grpo_contribution(
+-                self._forward(data, indices), [old[i] for i in indices],
++                current, [old[i] for i in indices],
+                 [data["rewards"][i] for i in indices], [data["loss_masks"][i] for i in indices],
+                 [data["rollout_mask_sums"][i] for i in indices], self.args.eps_clip,
+                 self.args.eps_clip_high, getattr(self.args, "eps_clip_c", None))
+             (contribution * backward_scale(self.data_world_size, self.args.global_batch_size)).backward()
+             local_loss += contribution.detach()
+             local_clip += clipped.detach()
++        if self._precision_audit is not None:
++            self._precision_audit.before_clip()
+         norm_squared = torch.zeros((), device=self.device)
+         for parameter in self.model.parameters():
+             if parameter.grad is not None:
+@@ -213,6 +238,8 @@ class FSDP2TrainRayActor(TrainRayActor):
+                   "loss": metrics[0].item(), "clip_fraction": metrics[1].item(),
+                   "global_grad_norm": grad_norm, "q_projection_update_l2": update_l2,
+                   "data_domain": self.data_world_size, "microbatches": len(schedules)}
++        if self._precision_audit is not None:
++            self._precision_audit.after_step(self.step, result)
+         self.step_records.append(result)
+         report_dir = Path(getattr(self.args, "fsdp_report_dir",
+                                   Path(self.args.update_weight_disk_dir).parent / "rank-reports"))
+@@ -231,11 +258,16 @@ class FSDP2TrainRayActor(TrainRayActor):
+         import fsdp_turbo
+ 
+         self.model.eval()
++        version = self.weight_version + 1
++        if self._precision_audit is not None:
++            self._precision_audit.phase(f"publish_v{version:06d}")
+         probe_tokens = torch.tensor([[i % self.hf_config.vocab_size for i in (1, 2, 3, 4)]], device=self.device)
+         with torch.no_grad():
+             logits = self.model(input_ids=probe_tokens, use_cache=False).logits[0, -1, :16].float().cpu().tolist()
++        reshard_to_master_shards(self.hf_model)
++        live_shards = (self._precision_audit.before_publish(version)
++                       if self._precision_audit is not None else None)
+         full_state = get_model_state_dict(self.hf_model, options=StateDictOptions(full_state_dict=True, cpu_offload=True))
+-        version = self.weight_version + 1
+         status = [None]
+         if self.data_rank == 0:
+             try:
+@@ -249,8 +281,13 @@ class FSDP2TrainRayActor(TrainRayActor):
+                            "reduce_dtype": "torch.float32"}
+                 probe = {"input_ids": probe_tokens.cpu().tolist(), "logits": logits,
+                          "forward_dtype": "torch.bfloat16", "atol": 0.02, "rtol": 0.02}
++                audit = None
++                if live_shards is not None:
++                    from .precision_audit import verify_full_state_shards
++
++                    audit = verify_full_state_shards(full_state, live_shards)
+                 status[0] = {"result": write_export(self.hf_model, full_state, self.args.update_weight_disk_dir,
+-                                                   version, probe, runtime)}
++                                                   version, probe, runtime, precision_audit=audit)}
+             except Exception as error:
+                 status[0] = {"error": f"{type(error).__name__}: {error}"}
+         dist.broadcast_object_list(status, src=0, group=get_gloo_group())
+diff --git a/slime/backends/fsdp2_utils/export.py b/slime/backends/fsdp2_utils/export.py
+index 15044777..441acae2 100644
+--- a/slime/backends/fsdp2_utils/export.py
++++ b/slime/backends/fsdp2_utils/export.py
+@@ -9,6 +9,30 @@ import tempfile
+ import torch
+ 
+ 
++def reshard_to_master_shards(model):
++    """End an inference-only forward boundary using native FSDP's public API.
++
++    Native root FSDP may retain BF16 unsharded compute parameters after a
++    no-grad forward. Restore the original FP32 DTensor Parameters before
++    inspecting/exporting masters or beginning a new autograd forward. Never
++    call this between a grad-enabled forward and its backward.
++    """
++    from torch.distributed.fsdp import FSDPModule
++    from torch.distributed.tensor import DTensor
++
++    modules = [module for module in model.modules() if isinstance(module, FSDPModule)]
++    if not modules:
++        raise RuntimeError("Expected the native FSDP model at an inference boundary")
++    # reshard() is deliberately non-recursive in the public FSDP API.
++    for module in reversed(modules):
++        module.reshard()
++    parameters = dict(model.named_parameters())
++    for name, parameter in parameters.items():
++        if not isinstance(parameter, DTensor) or parameter.to_local().dtype != torch.float32:
++            raise RuntimeError(f"Inference boundary did not restore the FP32 master shard: {name}")
++    return {"fsdp_modules": len(modules), "master_parameters": len(parameters)}
++
++
+ def _file_sha256(path):
+     digest = hashlib.sha256()
+     with open(path, "rb") as stream:
+@@ -17,7 +41,7 @@ def _file_sha256(path):
+     return digest.hexdigest()
+ 
+ 
+-def write_export(model, state_dict, root, weight_version, probe, runtime):
++def write_export(model, state_dict, root, weight_version, probe, runtime, precision_audit=None):
+     """Rank-zero writer. Caller must gather every FSDP shard before this call."""
+     root = Path(root).resolve()
+     root.mkdir(parents=True, exist_ok=True)
+@@ -44,6 +68,8 @@ def write_export(model, state_dict, root, weight_version, probe, runtime):
+         manifest = {"schema_version": 2, "weight_version": weight_version, "format": "hf-full-cpu",
+                     "runtime": runtime, "probe": probe, "files": files,
+                     "state": inventory}
++        if precision_audit is not None:
++            manifest["precision_audit"] = precision_audit
+         (staging / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+         (staging / "COMPLETE").write_text(str(weight_version) + "\n")
+         os.rename(staging, destination)
+@@ -87,6 +113,11 @@ def verify_exported_model(model_path, manifest_path, weight_version):
+         if not torch.isfinite(tensor).all():
+             raise ValueError(f"Cold-loaded tensor is nonfinite: {name}")
+     tensor_count = len(state)
++    full_byte_audit = None
++    if "precision_audit" in manifest:
++        from .precision_audit import verify_cold_loaded_state
++
++        full_byte_audit = verify_cold_loaded_state(state, manifest["precision_audit"])
+     # Release the inventory mapping AND the final loop tensor before converting
+     # the model; either can otherwise retain the old full FP32 storage.
+     del state, tensor
+@@ -115,6 +146,8 @@ def verify_exported_model(model_path, manifest_path, weight_version):
+               "probe_max_abs": (actual - expected).abs().max().item(),
+               "receiver_storage_dtype": "torch.float32", "receiver_forward_dtype": str(forward_dtype),
+               "receiver_dtype": str(forward_dtype), "receiver_device": "cpu"}
++    if full_byte_audit is not None:
++        result["precision_audit"] = full_byte_audit
+     # This receipt is outside manifest.files and does not alter published weights.
+     temporary = root / f".receiver-receipt-{os.getpid()}.json"
+     temporary.write_text(json.dumps(result, indent=2) + "\n")
+diff --git a/slime/backends/fsdp2_utils/precision_audit.py b/slime/backends/fsdp2_utils/precision_audit.py
+new file mode 100644
+index 00000000..718b2aa1
+--- /dev/null
++++ b/slime/backends/fsdp2_utils/precision_audit.py
+@@ -0,0 +1,684 @@
++"""Optional measured precision and full byte audit for the real FSDP2 actor.
++
++Disabled unless SLIME_FSDP2_PRECISION_AUDIT=1 is passed to training workers.
++No training algorithm, communication result or checkpoint dtype is replaced.
++"""
++
++from contextlib import contextmanager
++import hashlib
++import json
++import math
++import os
++from pathlib import Path
++
++import torch
++from torch.utils._python_dispatch import TorchDispatchMode
++
++
++def cpu_tensor(value):
++    """Return an independent contiguous CPU copy, including a DTensor's shard."""
++    value = value.detach()
++    if hasattr(value, "to_local"):
++        value = value.to_local()
++    return value.to(device="cpu", copy=True).contiguous()
++
++
++def tensor_sha256(value):
++    """Hash exact contiguous bytes, including BF16 and signed zero representations."""
++    value = cpu_tensor(value)
++    raw = value.reshape(-1).view(torch.uint8).numpy()
++    return hashlib.sha256(memoryview(raw)).hexdigest()
++
++
++def tensor_record(value, *, hash_bytes=True):
++    if not isinstance(value, torch.Tensor):
++        raise TypeError(f"Expected a tensor, got {type(value).__name__}")
++    local = value.to_local() if hasattr(value, "to_local") else value
++    record = {"dtype": str(local.dtype), "device": str(local.device), "shape": list(local.shape),
++              "numel": local.numel(), "finite": bool(torch.isfinite(local.detach()).all().item())}
++    if hash_bytes:
++        record["sha256"] = tensor_sha256(local)
++    return record
++
++
++def placement_record(value):
++    if not hasattr(value, "placements"):
++        return {"sharded": False}
++    specs = []
++    for placement in value.placements:
++        if placement.is_replicate():
++            specs.append({"kind": "Replicate"})
++        elif placement.is_shard():
++            specs.append({"kind": "Shard", "dim": placement.dim})
++        else:
++            raise ValueError(f"Cannot cold-load compare a partial placement: {placement}")
++    return {"sharded": True, "global_shape": list(value.shape),
++            "mesh_shape": list(value.device_mesh.shape), "mesh_coordinate": value.device_mesh.get_coordinate(),
++            "placements": [str(p) for p in value.placements], "placement_specs": specs}
++
++
++def parameter_shards(model, *, expected_dtype=torch.float32, require_world_size=None):
++    records = {}
++    for name, parameter in model.named_parameters():
++        local = parameter.to_local() if hasattr(parameter, "to_local") else parameter
++        record = {**tensor_record(parameter), **placement_record(parameter)}
++        if local.dtype != expected_dtype or not record["finite"]:
++            raise AssertionError(f"Invalid resident parameter {name}: {record}")
++        if require_world_size is not None and (
++            not record["sharded"] or local.numel() * require_world_size != parameter.numel()
++        ):
++            raise AssertionError(f"Parameter {name} is not exactly {require_world_size}-way sharded")
++        records[name] = record
++    if not records:
++        raise AssertionError("No model parameters were inspected")
++    return records
++
++
++def gradient_records(model, *, require_all=True, expected_dtype=torch.float32):
++    records = {}
++    for name, parameter in model.named_parameters():
++        if not parameter.requires_grad:
++            continue
++        if parameter.grad is None:
++            records[name] = {"missing": True}
++            if require_all:
++                raise AssertionError(f"Trainable parameter has no gradient: {name}")
++            continue
++        record = tensor_record(parameter.grad)
++        record["missing"] = False
++        local = parameter.grad.to_local() if hasattr(parameter.grad, "to_local") else parameter.grad
++        record["l2"] = cpu_tensor(local).double().norm().item()
++        if local.dtype != expected_dtype or not record["finite"]:
++            raise AssertionError(f"Invalid gradient for {name}: {record}")
++        records[name] = record
++    return records
++
++
++def optimizer_records(model, optimizer, *, initialized):
++    records = {}
++    for name, parameter in model.named_parameters():
++        state = optimizer.state.get(parameter, {})
++        result = {}
++        for key, value in state.items():
++            if isinstance(value, torch.Tensor):
++                record = tensor_record(value)
++                if not record["finite"]:
++                    raise AssertionError(f"Nonfinite optimizer state: {name}.{key}")
++                if key in ("exp_avg", "exp_avg_sq") and value.dtype != torch.float32:
++                    raise AssertionError(f"Adam moment is not FP32: {name}.{key}: {value.dtype}")
++                if value.numel() == 1:
++                    record["value"] = value.item()
++                result[key] = record
++            else:
++                result[key] = {"value": value}
++        if initialized and parameter.requires_grad and not {"step", "exp_avg", "exp_avg_sq"} <= state.keys():
++            raise AssertionError(f"Missing Adam state for {name}")
++        records[name] = result
++    return records
++
++
++def buffer_records(model, expected_floating_dtype=torch.float32):
++    result = {name: tensor_record(value) for name, value in model.named_buffers()}
++    for name, record in result.items():
++        value = dict(model.named_buffers())[name]
++        if value.is_floating_point() and value.dtype != expected_floating_dtype:
++            raise AssertionError(f"Sensitive buffer is not {expected_floating_dtype}: {name}: {value.dtype}")
++        if not record["finite"]:
++            raise AssertionError(f"Nonfinite buffer: {name}")
++    return result
++
++
++def coldload_shard(full_tensor, record):
++    """Use the recorded mesh coordinate and placements, never rank modulo guesses."""
++    value = full_tensor.detach()
++    if list(value.shape) != record["global_shape"]:
++        raise AssertionError("Cold-load global shape differs from the live parameter")
++    for size, coordinate, spec in zip(record["mesh_shape"], record["mesh_coordinate"],
++                                      record["placement_specs"], strict=True):
++        if spec["kind"] == "Shard":
++            dimension = spec["dim"]
++            if value.shape[dimension] % size:
++                raise AssertionError("This audit requires evenly divisible shards")
++            value = value.chunk(size, dim=dimension)[coordinate]
++        elif spec["kind"] != "Replicate":
++            raise AssertionError("Unexpected placement")
++    value = value.contiguous()
++    if list(value.shape) != record["shape"]:
++        raise AssertionError("Cold-load local shape differs from the live shard")
++    return value
++
++
++def byte_equal(left, right):
++    left, right = cpu_tensor(left), cpu_tensor(right)
++    return (left.dtype == right.dtype and left.shape == right.shape
++            and torch.equal(left.reshape(-1).view(torch.uint8), right.reshape(-1).view(torch.uint8)))
++
++
++def _not_json(value):
++    raise TypeError(f"Not JSON serializable: {type(value).__name__}")
++
++
++def write_json(path, value):
++    path = Path(path)
++    path.parent.mkdir(parents=True, exist_ok=True)
++    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
++    temporary.write_text(json.dumps(value, indent=2, allow_nan=False, default=lambda item: str(item) if isinstance(item, Path) else _not_json(item)) + "\n")
++    os.replace(temporary, path)
++
++
++def _tensors(value):
++    if isinstance(value, torch.Tensor):
++        yield value
++    elif isinstance(value, dict):
++        for child in value.values():
++            yield from _tensors(child)
++    elif isinstance(value, (list, tuple)):
++        for child in value:
++            yield from _tensors(child)
++
++
++class ModuleProbe:
++    """Observe real leaf inputs/outputs, unsharded weights and sensitive buffers."""
++
++    def __init__(self, model):
++        self.phase = "setup"
++        self.records = []
++        self.handles = []
++        self.module_types = {}
++        for name, module in model.named_modules():
++            kind = type(module).__name__
++            # Native FSDP dynamically subclasses independently wrapped leaves
++            # as FSDPLinear/FSDPEmbedding. Their real nn base types are retained.
++            dense_leaf = isinstance(module, (torch.nn.Linear, torch.nn.Embedding))
++            if not dense_leaf and "RMSNorm" not in kind and "RotaryEmbedding" not in kind:
++                continue
++            self.module_types[name] = type(module).__module__ + "." + type(module).__qualname__
++            self.handles.append(module.register_forward_pre_hook(self._pre(name), with_kwargs=True))
++            self.handles.append(module.register_forward_hook(self._post(name), with_kwargs=True))
++
++    def _append(self, name, event, tensors, parameters=None):
++        records = [tensor_record(tensor, hash_bytes=False) for tensor in tensors]
++        if any(not record["finite"] for record in records) or any(not record["finite"] for record in (parameters or {}).values()):
++            raise AssertionError(f"Nonfinite module {event}: {name}, phase {self.phase}")
++        self.records.append({"phase": self.phase, "module": name, "module_type": self.module_types[name], "event": event,
++                             "tensors": records, "parameters": parameters or {}})
++
++    def _pre(self, name):
++        def observe(module, inputs, kwargs):
++            parameters = {key: tensor_record(value, hash_bytes=False)
++                          for key, value in module.named_parameters(recurse=False)}
++            self._append(name, "input", _tensors((inputs, kwargs)), parameters)
++        return observe
++
++    def _post(self, name):
++        def observe(module, inputs, kwargs, output):
++            self._append(name, "output", _tensors(output))
++        return observe
++
++    def close(self):
++        for handle in self.handles:
++            handle.remove()
++        self.handles.clear()
++
++
++class OperatorProbe(TorchDispatchMode):
++    """Record metadata of existing sensitive ATen calls without changing results."""
++
++    def __init__(self):
++        super().__init__()
++        self.phase = "setup"
++        self.records = []
++
++    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
++        result = func(*args, **(kwargs or {}))
++        name = func._schema.name.split("::")[-1]
++        if name in {"mean", "rsqrt", "softmax", "_softmax", "log_softmax", "_log_softmax", "sin", "cos"}:
++            def metadata(value):
++                return [{"dtype": str(tensor.dtype), "device": str(tensor.device), "shape": list(tensor.shape)}
++                        for tensor in _tensors(value)]
++            self.records.append({"phase": self.phase, "operator": str(func), "family": name.lstrip("_"),
++                                 "inputs": metadata((args, kwargs or {})), "outputs": metadata(result)})
++        return result
++
++
++def validate_operator_observations(records):
++    required = {"mean", "rsqrt", "softmax", "log_softmax", "sin", "cos"}
++    seen = {record["family"] for record in records}
++    if not required <= seen:
++        raise AssertionError(f"Sensitive operator evidence is incomplete: {required - seen}")
++    for record in records:
++        tensors = record["inputs"] + record["outputs"]
++        if not tensors or any(tensor["dtype"] != "torch.float32" for tensor in tensors):
++            raise AssertionError(f"Sensitive operator did not execute in FP32: {record}")
++    return {"passed": True, "operator_families": sorted(seen), "calls": len(records),
++            "observed_input_output_dtype": "torch.float32", "scope": "Existing forward ATen calls only"}
++
++
++def compare_response_logprobs(current, previous, mask):
++    """Detach existing response values; only independent CPU copies are inspected."""
++    actual_dtype = str(current.dtype)
++    current = cpu_tensor(current)
++    previous = cpu_tensor(torch.as_tensor(previous, dtype=torch.float32))
++    mask = cpu_tensor(torch.as_tensor(mask, dtype=torch.float32))
++    if current.ndim != 1 or current.shape != previous.shape or current.shape != mask.shape:
++        raise AssertionError("Current/old response logprob and mask shapes differ")
++    if current.dtype != torch.float32 or any(not torch.isfinite(value).all() for value in (current, previous, mask)):
++        raise AssertionError("Response audit requires actual finite FP32 current/old logprobs and mask")
++    if (mask < 0).any():
++        raise AssertionError("Response audit mask is negative")
++    difference = current - previous
++    ratio = difference.exp()
++    if not torch.isfinite(ratio).all():
++        raise AssertionError("Response audit probability ratio is nonfinite")
++    valid = mask > 0
++    return {"current_dtype": actual_dtype, "old_dtype_used_by_loss": str(previous.dtype),
++            "current_log_probs": current.tolist(), "old_log_probs": previous.tolist(),
++            "difference": difference.tolist(), "ratio": ratio.tolist(), "loss_mask": mask.tolist(),
++            "response_tokens": current.numel(), "valid_tokens": int(valid.sum().item()),
++            "all_response_max_abs": difference.abs().max().item() if current.numel() else 0.0,
++            "valid_response_max_abs": difference[valid].abs().max().item() if valid.any() else 0.0}
++
++
++def validate_logprob_tolerance(path, temperature, manifest):
++    raw = Path(path).read_bytes()
++    value = json.loads(raw)
++    limit = value.get("max_abs")
++    if (value.get("schema_version") != 1 or value.get("metric") != "response_token_logprob_max_abs"
++            or value.get("acceptance_ready") is not True or isinstance(limit, bool)
++            or not isinstance(limit, (int, float)) or not math.isfinite(limit) or limit < 0):
++        raise AssertionError("Independent logprob tolerance is not ready or has an invalid maximum")
++    if value.get("temperature") != temperature:
++        raise AssertionError("Independent logprob tolerance temperature differs from actual training")
++    full_hashes = manifest.get("precision_audit", {}).get("full_parameter_sha256")
++    candidate_hashes = value.get("full_parameter_sha256", {})
++    if candidate_hashes and all(isinstance(item, str) for item in candidate_hashes.values()):
++        candidate_hashes = {"checkpoint": candidate_hashes}
++    parameter_match = bool(full_hashes) and any(item == full_hashes for item in candidate_hashes.values())
++    files = {name: record["sha256"] for name, record in manifest["files"].items() if name.endswith(".safetensors")}
++    payloads = value.get("checkpoint_payload_sha256", {})
++    payload_match = bool(files) and any(
++        all(item.get(name) == digest for name, digest in files.items()) for item in payloads.values())
++    if not parameter_match and not payload_match:
++        raise AssertionError("Independent logprob tolerance was not calibrated on this accepted checkpoint")
++    return {"max_abs": float(limit), "temperature": temperature, "checkpoint_match": True,
++            "match_by": "complete parameter bytes" if parameter_match else "complete safetensors payload bytes",
++            "tolerance_file_sha256": hashlib.sha256(raw).hexdigest(), "calibration": value,
++            "scope": "Empirical independent-HF calibrated max_abs on this checkpoint; valid loss-mask tokens"}
++
++
++def policy_case_fingerprint(sample):
++    value = {"prompt_token_ids": [int(item) for item in sample["prompt_token_ids"]],
++             "response_token_ids": [int(item) for item in sample["response_token_ids"]],
++             "loss_mask": [float(item) for item in sample["loss_mask"]]}
++    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
++
++
++def validate_policy_cases(samples, calibration):
++    fingerprints = calibration.get("case_fingerprints_sha256")
++    if not isinstance(fingerprints, list) or not fingerprints or any(not isinstance(value, str) for value in fingerprints):
++        raise AssertionError("Independent HF calibration is missing its actual token/mask case fingerprints")
++    for sample in samples:
++        fingerprint = policy_case_fingerprint(sample)
++        if sample.get("case_fingerprint_sha256", fingerprint) != fingerprint:
++            raise AssertionError("Saved response token/mask case fingerprint is internally inconsistent")
++        if fingerprint not in fingerprints:
++            raise AssertionError("Actual response token/mask case was not independently HF calibrated")
++
++
++def evaluate_saved_policy_logprobs(records, calibration_path, *, expected_world_size=8, expected_steps=2):
++    """Validate saved actual-forward LPs post hoc, never recompute a forward."""
++    if not records:
++        raise AssertionError("No actual training-forward response records were provided")
++    if expected_world_size < 1 or expected_steps < 1:
++        raise AssertionError("Expected actual run inventory must be positive")
++    if {record["step"] for record in records} != set(range(1, expected_steps + 1)):
++        raise AssertionError("Saved response audit does not cover every expected optimizer step")
++    for step in range(1, expected_steps + 1):
++        step_records = [record for record in records if record["step"] == step]
++        if ({record["rank"] for record in step_records} != set(range(expected_world_size))
++                or any(record["world_size"] != expected_world_size for record in step_records)):
++            raise AssertionError("Saved response audit does not cover every actual training rank")
++        expected_batches = {record["expected_microbatches"] for record in step_records}
++        global_batches = {record["global_batch_size"] for record in step_records}
++        if len(expected_batches) != 1 or len(global_batches) != 1 or next(iter(expected_batches)) < 1:
++            raise AssertionError("Saved response audit has inconsistent global/microbatch inventory")
++        expected_pairs = {(rank, mb) for rank in range(expected_world_size) for mb in range(next(iter(expected_batches)))}
++        pairs = [(record["rank"], record["microbatch"]) for record in step_records]
++        ids = [sample["sample_rollout_id"] for record in step_records for sample in record["samples"]]
++        if (len(pairs) != len(expected_pairs) or set(pairs) != expected_pairs
++                or len(ids) != next(iter(global_batches)) or len(set(ids)) != len(ids)):
++            raise AssertionError("Saved response audit has missing or duplicate rank/microbatch/sample coverage")
++    checked = []
++    for record in records:
++        if record.get("old_logprob_source") != "external_rollout_log_probs":
++            raise AssertionError("Saved old logprobs are not from external rollout")
++        tolerance = validate_logprob_tolerance(calibration_path, record["temperature"], record["accepted_manifest"])
++        if (record["accepted_manifest"]["weight_version"] != record["accepted_weight_version"]
++                or record["accepted_weight_version"] != record["step"] - 1):
++            raise AssertionError("Saved response audit accepted weight version differs from the actual step")
++        samples = record["samples"]
++        if not samples:
++            raise AssertionError("Saved training microbatch has no response observations")
++        validate_policy_cases(samples, tolerance["calibration"])
++        maximum = 0.0
++        valid_count = 0
++        for sample in samples:
++            measured = compare_response_logprobs(torch.tensor(sample["current_log_probs"], dtype=torch.float32),
++                                               sample["old_log_probs"], sample["loss_mask"])
++            for key in ("difference", "ratio", "valid_tokens", "valid_response_max_abs", "all_response_max_abs"):
++                if measured[key] != sample[key]:
++                    raise AssertionError(f"Saved response audit is internally inconsistent: {key}")
++            maximum = max(maximum, measured["valid_response_max_abs"])
++            valid_count += measured["valid_tokens"]
++        if not valid_count:
++            raise AssertionError("Saved microbatch has no valid response tokens")
++        checked.append({"rank": record["rank"], "step": record["step"], "microbatch": record["microbatch"],
++                        "accepted_weight_version": record["accepted_weight_version"], "valid_tokens": valid_count,
++                        "max_abs": maximum, "limit": tolerance["max_abs"], "passed": maximum <= tolerance["max_abs"],
++                        "tolerance_file_sha256": tolerance["tolerance_file_sha256"]})
++    return {"passed": all(item["passed"] for item in checked), "records": checked,
++            "scope": "Saved actual training-forward current/rollout LPs; no new model forward"}
++
++
++class CollectiveProbe:
++    """Wrap the real process collectives, recording actual wire tensor dtypes.
++
++    No replacement result, mock collective, compiler patch or permission change
++    is used. The original call is always executed and exceptions propagate.
++    """
++
++    def __init__(self):
++        self.phase = "setup"
++        self.records = []
++        self.originals = {}
++
++    @contextmanager
++    def observe(self):
++        import torch.distributed as dist
++
++        try:
++            for name in ("reduce_scatter_tensor", "all_gather_into_tensor", "all_reduce"):
++                original = getattr(dist, name)
++                self.originals[name] = original
++                setattr(dist, name, self._wrap(name, original))
++            yield self
++        finally:
++            for name, original in self.originals.items():
++                setattr(dist, name, original)
++            self.originals.clear()
++
++    def _wrap(self, name, original):
++        def observed(*args, **kwargs):
++            # Capture metadata before the genuine collective. Avoid synchronizing
++            # async output buffers or introducing a second collective here.
++            tensors = list(_tensors(args)) + list(_tensors({k: v for k, v in kwargs.items()
++                                                          if k in ("tensor", "input_tensor", "output_tensor", "input", "output")}))
++            record = {"phase": self.phase, "collective": name, "op": str(kwargs.get("op", "default")),
++                      "async_op": kwargs.get("async_op", False),
++                      "tensors": [{"dtype": str(value.dtype), "device": str(value.device),
++                                   "shape": list(value.shape)} for value in tensors]}
++            self.records.append(record)
++            return original(*args, **kwargs)
++        return observed
++
++
++def validate_observations(module_records, collective_records, parameter_names, forward_dtype, world_size):
++    """Fail when the real forward/reduction evidence contradicts the policy."""
++    expected = {"bf16": "torch.bfloat16", "fp32": "torch.float32"}[forward_dtype]
++    seen = {}
++    for event in module_records:
++        if event["event"] != "input":
++            continue
++        for key, tensor in event["parameters"].items():
++            name = f"{event['module']}.{key}" if event["module"] else key
++            if tensor["dtype"] != expected or not tensor["finite"]:
++                raise AssertionError(f"Observed compute parameter {name} differs from {expected}: {tensor}")
++            seen.setdefault(name, set()).add(tensor["dtype"])
++    if set(seen) != set(parameter_names):
++        raise AssertionError(f"Compute probes did not observe every parameter: missing={set(parameter_names) - set(seen)}")
++    training = [event for event in collective_records if event["phase"].startswith("step")
++                and ("_old_mb" in event["phase"] or "_current_mb" in event["phase"])]
++    reductions = [event for event in training if event["collective"] == "reduce_scatter_tensor"]
++    gathers = [event for event in training if event["collective"] == "all_gather_into_tensor"]
++    if world_size > 1 and (not reductions or not gathers):
++        raise AssertionError("No real FSDP training all-gather/reduce-scatter was observed")
++    for event in reductions:
++        if not event["tensors"] or any(tensor["dtype"] != "torch.float32" for tensor in event["tensors"]):
++            raise AssertionError(f"Actual gradient reduction was not FP32: {event}")
++    for event in gathers:
++        if not event["tensors"] or any(tensor["dtype"] != expected for tensor in event["tensors"]):
++            raise AssertionError(f"Actual parameter all-gather differs from compute dtype: {event}")
++    return {"passed": True, "compute_parameters_observed": len(seen), "observed_compute_dtype": expected,
++            "training_all_gather_calls": len(gathers), "training_reduce_scatter_calls": len(reductions),
++            "observed_reduction_dtype": "torch.float32" if reductions else None,
++            "single_rank_has_no_wire_reduction": world_size == 1}
++
++
++def verify_full_state_shards(state, rank_records):
++    """Verify actual gathered/cold-loaded F32 state against all live shard bytes."""
++    if not rank_records or any(set(record) != set(state) for record in rank_records):
++        raise AssertionError("Live/gathered/cold-loaded parameter inventories differ")
++    if len(state) != 25:
++        raise AssertionError("The minimal two-layer actor audit requires all 25 parameters")
++    full_hashes = {}
++    for name, tensor in state.items():
++        if tensor.device.type != "cpu" or tensor.dtype != torch.float32 or not torch.isfinite(tensor).all():
++            raise AssertionError(f"Gathered state is not finite FP32 CPU: {name}")
++        full_hashes[name] = tensor_sha256(tensor)
++        for rank, records in enumerate(rank_records):
++            expected = records[name]
++            actual = coldload_shard(tensor, expected)
++            if str(actual.dtype) != expected["dtype"] or tensor_sha256(actual) != expected["sha256"]:
++                raise AssertionError(f"Live/gathered/cold-loaded bytes differ for rank {rank}, {name}")
++    return {"schema_version": 1, "world_size": len(rank_records), "parameter_count": len(state),
++            "shard_count": len(state) * len(rank_records), "gather_verified": True,
++            "full_parameter_sha256": full_hashes, "rank_shards": rank_records}
++
++
++def verify_cold_loaded_state(state, audit):
++    if audit.get("schema_version") != 1 or not audit.get("gather_verified"):
++        raise AssertionError("Invalid optional precision-audit manifest")
++    measured = verify_full_state_shards(state, audit["rank_shards"])
++    for key in ("world_size", "parameter_count", "shard_count", "full_parameter_sha256"):
++        if measured[key] != audit[key]:
++            raise AssertionError(f"Cold-loaded state differs from live/gathered audit: {key}")
++    return {"verified": True, "parameter_count": measured["parameter_count"],
++            "shard_count": measured["shard_count"], "comparison": "Complete contiguous CPU tensor bytes SHA256"}
++
++
++class ActorPrecisionAudit:
++    def __init__(self, model, optimizer, args, rank, world_size):
++        self.model, self.optimizer = model, optimizer
++        self.rank, self.world_size = rank, world_size
++        self.args = args
++        self.weight_root = Path(args.update_weight_disk_dir)
++        self.temperature = float(args.rollout_temperature)
++        self.old_source = ("external_rollout_log_probs" if getattr(args, "fsdp_external_rollout", False)
++                           else "rollout_payload_log_probs" if args.use_rollout_logprobs
++                           else "current_policy_step_start_snapshot")
++        self.tolerance_path = os.environ.get("SLIME_FSDP2_LOGPROB_TOLERANCE_FILE")
++        self.operators = OperatorProbe() if os.environ.get("SLIME_FSDP2_OPERATOR_AUDIT") == "1" else None
++        self.root = Path(os.environ.get("SLIME_FSDP2_AUDIT_DIR",
++                                       str(Path(args.update_weight_disk_dir).parent / "precision-audit")))
++        self.modules = ModuleProbe(model)
++        self.collectives = CollectiveProbe()
++        self.collective_context = self.collectives.observe()
++        self.collective_context.__enter__()
++        initial = self._synchronized(lambda: {
++            "parameters": parameter_shards(model, require_world_size=world_size),
++            "optimizer": optimizer_records(model, optimizer, initialized=False), "buffers": buffer_records(model)})
++        if len(initial["parameters"]) != 25:
++            raise AssertionError("Precision audit did not cover the complete 25-parameter model")
++        write_json(self.root / f"rank{rank:02d}-initial.json", initial)
++        self.pre_clip = None
++        self.module_start = self.collective_start = 0
++
++    def _synchronized(self, callback):
++        import torch.distributed as dist
++        from slime.utils.distributed_utils import get_gloo_group
++
++        result = {"error": None}
++        try:
++            result["value"] = callback()
++        except Exception as error:
++            result["error"] = f"rank {self.rank}: {type(error).__name__}: {error}"
++        errors = [None] * self.world_size
++        dist.all_gather_object(errors, result["error"], group=get_gloo_group())
++        if any(error for error in errors):
++            raise AssertionError("; ".join(error for error in errors if error))
++        return result["value"]
++
++    def begin_step(self, rollout_id, weight_version):
++        self.pre_clip = None
++        self.module_start = len(self.modules.records)
++        self.collective_start = len(self.collectives.records)
++        self.operator_start = len(self.operators.records) if self.operators is not None else 0
++        self.logprobs = []
++        self.rollout_id, self.weight_version = rollout_id, weight_version
++
++        def identify():
++            manifest = json.loads((self.weight_root / f"weight_v{weight_version:06d}" / "manifest.json").read_text())
++            if manifest["weight_version"] != weight_version or len(manifest["precision_audit"]["full_parameter_sha256"]) != 25:
++                raise AssertionError("The accepted weight identity is missing its complete 25-parameter audit")
++            tolerance = (validate_logprob_tolerance(self.tolerance_path, self.temperature, manifest)
++                         if self.tolerance_path else None)
++            if tolerance is not None and self.old_source != "external_rollout_log_probs":
++                raise AssertionError("An independent inference-LP tolerance requires real external rollout logprobs")
++            return manifest, tolerance
++        self.accepted_manifest, self.tolerance = self._synchronized(identify)
++
++    def phase(self, label):
++        self.modules.phase = self.collectives.phase = label
++        if self.operators is not None:
++            self.operators.phase = label
++
++    @contextmanager
++    def forward_observation(self):
++        if self.operators is None:
++            yield
++        else:
++            with self.operators:
++                yield
++
++    def observe_logprobs(self, current, old, data, indices, microbatch, step):
++        def capture():
++            samples = []
++            for index, actual in zip(indices, current, strict=True):
++                observed = compare_response_logprobs(actual, old[index], data["loss_masks"][index])
++                sample = {"sample_index": data["sample_indices"][index],
++                                "sample_rollout_id": data["rollout_ids"][index],
++                                "rollout_position": data["partition"][index],
++                                "prompt_token_ids": cpu_tensor(torch.as_tensor(data["tokens"][index][:-len(actual)])).tolist(),
++                                "response_token_ids": cpu_tensor(torch.as_tensor(data["tokens"][index][-len(actual):])).tolist(), **observed}
++                sample["case_fingerprint_sha256"] = policy_case_fingerprint(sample)
++                samples.append(sample)
++            record = {"schema_version": 1, "rank": self.rank, "world_size": self.world_size,
++                      "step": step, "microbatch": microbatch, "rollout_id": self.rollout_id,
++                      "global_batch_size": self.args.global_batch_size,
++                      "expected_microbatches": len(data["micro_batch_indices"]),
++                      "accepted_weight_version": self.weight_version,
++                      "version_source": "Actor last completed publication; cross-check manager and rollout receipts",
++                      "accepted_manifest": self.accepted_manifest, "temperature": self.temperature,
++                      "old_logprob_source": self.old_source, "samples": samples,
++                      "numeric_acceptance": "not_evaluated_without_independent_HF_calibration"}
++            if self.tolerance is not None:
++                record["tolerance"] = self.tolerance
++                record["numeric_acceptance"] = "passed" if all(
++                    sample["valid_response_max_abs"] <= self.tolerance["max_abs"] for sample in samples) else "failed"
++                try:
++                    validate_policy_cases(samples, self.tolerance["calibration"])
++                except AssertionError as error:
++                    record["numeric_acceptance"] = "failed"
++                    record["calibrated_case_error"] = str(error)
++            write_json(self.root / f"rank{self.rank:02d}-step{step:02d}-mb{microbatch:02d}-logprobs.json", record)
++            if record["numeric_acceptance"] == "failed":
++                raise AssertionError("Actual training/rollout response logprobs exceed the independent HF tolerance")
++            return record
++        self.logprobs.append(self._synchronized(capture))
++
++    def before_clip(self):
++        import torch.distributed as dist
++        from slime.utils.distributed_utils import get_gloo_group
++
++        local = {"rank": self.rank, "sample_rollout_ids": [sample["sample_rollout_id"]
++                 for record in self.logprobs for sample in record["samples"]],
++                 "valid_tokens": sum(sample["valid_tokens"] for record in self.logprobs for sample in record["samples"]),
++                 "max_abs": max((sample["valid_response_max_abs"] for record in self.logprobs
++                                 for sample in record["samples"]), default=0.0)}
++        all_ranks = [None] * self.world_size
++        dist.all_gather_object(all_ranks, local, group=get_gloo_group())
++        identities = [identity for record in all_ranks for identity in record["sample_rollout_ids"]]
++        if len(identities) != self.args.global_batch_size or len(set(identities)) != len(identities):
++            raise AssertionError("Actual response logprob audit did not cover the complete global batch exactly once")
++        self.logprob_global = {"max_abs": max(record["max_abs"] for record in all_ranks),
++                               "valid_tokens": sum(record["valid_tokens"] for record in all_ranks),
++                               "samples": len(identities), "ranks": all_ranks,
++                               "numeric_acceptance": "passed" if self.tolerance is not None else "not_evaluated_without_independent_HF_calibration"}
++        self.pre_clip = self._synchronized(lambda: gradient_records(self.model))
++
++    def after_step(self, step, metrics):
++        def capture():
++            if self.pre_clip is None:
++                raise AssertionError("The pre-clipping gradient inventory was not captured")
++            parameters = parameter_shards(self.model, require_world_size=self.world_size)
++            for parameter in self.model.parameters():
++                if self.optimizer.state[parameter]["step"].item() != step:
++                    raise AssertionError("Actual Adam step differs from the completed optimizer step")
++            modules = self.modules.records[self.module_start:]
++            communications = self.collectives.records[self.collective_start:]
++            policy = validate_observations(modules, communications, parameters, "bf16", self.world_size)
++            operators = self.operators.records[self.operator_start:] if self.operators is not None else None
++            operator_policy = validate_operator_observations(operators) if operators is not None else None
++            return {"step": step, "rank": self.rank, "world_size": self.world_size,
++                    "metrics": metrics, "parameters": parameters, "gradients_pre_clip": self.pre_clip,
++                    "gradients_post_clip": gradient_records(self.model),
++                    "optimizer": optimizer_records(self.model, self.optimizer, initialized=True),
++                    "buffers": buffer_records(self.model), "observed_policy": policy,
++                    "module_probes": modules, "collective_probes": communications,
++                    "operator_probes": operators, "observed_sensitive_operator_policy": operator_policy,
++                    "global_response_logprob_observations": self.logprob_global,
++                    "response_logprob_microbatches": self.logprobs}
++        record = self._synchronized(capture)
++        write_json(self.root / f"rank{self.rank:02d}-step{step:02d}.json", record)
++
++    def before_publish(self, version):
++        import torch.distributed as dist
++        from slime.utils.distributed_utils import get_gloo_group
++
++        shards = self._synchronized(lambda: parameter_shards(self.model, require_world_size=self.world_size))
++        all_shards = [None] * self.world_size
++        dist.all_gather_object(all_shards, shards, group=get_gloo_group())
++        write_json(self.root / f"rank{self.rank:02d}-weight-v{version:06d}-live-shards.json", shards)
++        return all_shards
++
++
++def reload_sglang_from_disk(url, model_path, weight_version, timeout=600):
++    """Synchronously update the explicitly configured SGLang and verify identity."""
++    from urllib.parse import urlsplit
++    import requests
++
++    address = urlsplit(url)
++    if address.scheme not in ("http", "https") or not address.netloc or address.query or address.fragment:
++        raise ValueError("SLIME_FSDP2_SGLANG_URL must be an HTTP(S) base URL")
++    endpoint = url.rstrip("/")
++    payload = {"model_path": str(Path(model_path).resolve()), "load_format": "safetensors",
++               "weight_version": str(weight_version), "is_async": False, "flush_cache": True,
++               "abort_all_requests": False}
++    with requests.Session() as session:
++        # A directly configured local service must not be sent to a proxy from
++        # an unrelated shell environment. No credentials or cookies are reused.
++        session.trust_env = False
++        response = session.post(endpoint + "/update_weights_from_disk", json=payload, timeout=timeout)
++        response.raise_for_status()
++        update = response.json()
++        if not isinstance(update, dict) or update.get("success") is not True:
++            raise RuntimeError(f"SGLang rejected synchronous weight update: {update}")
++        response = session.get(endpoint + "/model_info", timeout=timeout)
++        response.raise_for_status()
++        identity = response.json()
++        if str(identity.get("weight_version")) != str(weight_version):
++            raise RuntimeError(f"SGLang weight version differs after disk update: {identity}")
++        if Path(identity.get("model_path", "")).resolve() != Path(model_path).resolve():
++            raise RuntimeError(f"SGLang checkpoint path differs after disk update: {identity}")
++    return {"verified": True, "weight_version": str(weight_version), "model_path": payload["model_path"],
++            "update_response": update, "model_info": identity, "sync": True, "cache_flushed": True}
+diff --git a/slime/ray/rollout.py b/slime/ray/rollout.py
+index 0fab369e..73416d88 100644
+--- a/slime/ray/rollout.py
++++ b/slime/ray/rollout.py
+@@ -150,7 +150,9 @@ class RolloutManager:
+ 
+     def accept_fsdp2_weights(self, model_path, weight_version, manifest_path):
+         """Cold-load a complete HF export; this is offline verification, not serving."""
+-        if self.args.train_backend != "fsdp2" or not self.args.fsdp_fixed_rollout:
++        if self.args.train_backend != "fsdp2" or not (
++            self.args.fsdp_fixed_rollout or getattr(self.args, "fsdp_external_rollout", False)
++        ):
+             raise RuntimeError("Offline FSDP2 receiver requires the fixed-rollout backend")
+         expected_version = getattr(self.args, "fsdp_weight_version", -1) + 1
+         if type(weight_version) is not int or weight_version != expected_version:
+@@ -165,6 +167,18 @@ class RolloutManager:
+         if (not isinstance(receipt, dict) or receipt.get("verified") is not True
+                 or receipt.get("weight_version") != weight_version or receipt.get("model_path") != str(expected_dir)):
+             raise RuntimeError("FSDP2 receiver returned an invalid verification receipt")
++        url = self.args.train_env_vars.get("SLIME_FSDP2_SGLANG_URL")
++        if url:
++            from slime.backends.fsdp2_utils.precision_audit import reload_sglang_from_disk
++
++            timeout = float(self.args.train_env_vars.get("SLIME_FSDP2_SGLANG_TIMEOUT", "600"))
++            if timeout <= 0:
++                raise ValueError("SLIME_FSDP2_SGLANG_TIMEOUT must be positive")
++            receipt["sglang_receiver"] = reload_sglang_from_disk(url, model_path, weight_version, timeout)
++            # Keep the complete offline+online acceptance evidence together.
++            from slime.backends.fsdp2_utils.precision_audit import write_json
++
++            write_json(Path(model_path) / "receiver-receipt.json", receipt)
+         # Publish the acceptance boundary only after the independent load succeeds.
+         self.args.fsdp_weight_version = weight_version
+         self.training_weight_version = weight_version
+diff --git a/slime/utils/fsdp2_arguments.py b/slime/utils/fsdp2_arguments.py
+index 5f51e8b0..2e0ce28a 100644
+--- a/slime/utils/fsdp2_arguments.py
++++ b/slime/utils/fsdp2_arguments.py
+@@ -14,6 +14,8 @@ def parse_fsdp2_args(add_slime_arguments, argv=None):
+     parser.add_argument("--debug-rollout-only", action="store_true")
+     parser.add_argument("--load-debug-rollout-data")
+     parser.add_argument("--fsdp-fixed-rollout", action="store_true", help="Use fixed tokens/rewards; no online generation")
++    parser.add_argument("--fsdp-external-rollout", action="store_true",
++                        help="Use a custom real external rollout and its old-policy logprobs")
+     parser.add_argument("--fsdp-model-config", required=True, help="Local Qwen3 configuration JSON")
+     parser.add_argument("--fsdp-turbo-config", help="Optional validated FSDPTurbo YAML plan")
+     parser.add_argument("--fsdp-random-init", action="store_true")
+@@ -40,7 +42,14 @@ def parse_fsdp2_args(add_slime_arguments, argv=None):
+             "train-env-vars must be a JSON object with string keys/values")
+     require(args.rollout_top_p == 1.0 and args.rollout_top_k == -1, "sampler support replay is not implemented")
+     require(args.over_sampling_batch_size in (None, args.rollout_batch_size), "oversampling is not implemented")
+-    require(args.fsdp_fixed_rollout, "first implementation requires --fsdp-fixed-rollout")
++    require(args.fsdp_fixed_rollout != args.fsdp_external_rollout,
++            "select exactly one of --fsdp-fixed-rollout or --fsdp-external-rollout")
++    if args.fsdp_external_rollout:
++        require(args.rollout_function_path != "fixed_rollout.generate_rollout",
++                "external rollout requires --rollout-function-path")
++        require(args.use_rollout_logprobs, "external rollout requires real --use-rollout-logprobs")
++        require(bool(args.train_env_vars.get("SLIME_FSDP2_SGLANG_URL")),
++                "external rollout requires an explicit SLIME_FSDP2_SGLANG_URL in train-env-vars")
+     require(args.fsdp_random_init, "first implementation requires --fsdp-random-init")
+     require(args.actor_num_nodes == 1 and args.actor_num_gpus_per_node == 8, "requires one node with eight NPUs")
+     require(args.num_gpus_per_node == 8, "--num-gpus-per-node must be 8")
+diff --git a/tests/fsdp2/test_precision_audit.py b/tests/fsdp2/test_precision_audit.py
+new file mode 100644
+index 00000000..6ef39ea4
+--- /dev/null
++++ b/tests/fsdp2/test_precision_audit.py
+@@ -0,0 +1,286 @@
++"""CPU byte/HTTP contract checks; real NPU precision remains an execution case."""
++
++import copy
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++import json
++from pathlib import Path
++import sys
++import threading
++
++import pytest
++import torch
++from transformers import Qwen3Config, Qwen3ForCausalLM
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
++
++from slime.backends.fsdp2_utils.export import verify_exported_model, write_export
++from slime.backends.fsdp2_utils.precision_audit import (reload_sglang_from_disk, tensor_record,
++                                                      verify_cold_loaded_state, verify_full_state_shards)
++
++
++def _tiny_model():
++    torch.manual_seed(19)
++    config = Qwen3Config(vocab_size=32, hidden_size=16, intermediate_size=32,
++                        num_hidden_layers=2, num_attention_heads=2, num_key_value_heads=1, head_dim=8)
++    config._attn_implementation = "eager"
++    return Qwen3ForCausalLM(config).float().eval()
++
++
++def _rank_shards(state):
++    result = []
++    for rank in range(8):
++        records = {}
++        for name, value in state.items():
++            shard = value.chunk(8, dim=0)[rank].contiguous()
++            records[name] = {**tensor_record(shard), "sharded": True, "global_shape": list(value.shape),
++                             "mesh_shape": [1, 8], "mesh_coordinate": [0, rank],
++                             "placements": ["R", "S(0)"],
++                             "placement_specs": [{"kind": "Replicate"}, {"kind": "Shard", "dim": 0}]}
++        result.append(records)
++    return result
++
++
++def test_full_25_by_8_live_gathered_saved_coldloaded_bytes(tmp_path):
++    model = _tiny_model()
++    state = model.state_dict()
++    audit = verify_full_state_shards(state, _rank_shards(state))
++    assert audit["parameter_count"] == 25 and audit["shard_count"] == 200
++    tokens = torch.tensor([[1, 2, 3, 4]])
++    with torch.no_grad():
++        logits = model(input_ids=tokens).logits[0, -1, :16].tolist()
++    probe = {"input_ids": tokens.tolist(), "logits": logits, "forward_dtype": "torch.float32", "atol": 1e-6, "rtol": 1e-6}
++    publication = write_export(model, state, tmp_path, 0, probe, {}, precision_audit=audit)
++    receipt = verify_exported_model(**publication)
++    assert receipt["precision_audit"]["verified"] is True
++    assert receipt["precision_audit"]["parameter_count"] == 25
++    assert receipt["precision_audit"]["shard_count"] == 200
++    manifest = json.loads(Path(publication["manifest_path"]).read_text())
++    assert manifest["schema_version"] == 2 and manifest["precision_audit"] == audit
++
++
++def test_coldload_detects_one_changed_parameter_and_missing_rank_inventory():
++    model = _tiny_model()
++    state = model.state_dict()
++    audit = verify_full_state_shards(state, _rank_shards(state))
++    changed = dict(state)
++    name = next(iter(changed))
++    changed[name] = changed[name].clone()
++    changed[name].reshape(-1)[-1] += 0.01
++    with pytest.raises(AssertionError, match="bytes differ"):
++        verify_cold_loaded_state(changed, audit)
++    bad = copy.deepcopy(audit)
++    del bad["rank_shards"][7][name]
++    with pytest.raises(AssertionError, match="inventories differ"):
++        verify_cold_loaded_state(state, bad)
++    bad = copy.deepcopy(audit)
++    bad["full_parameter_sha256"][name] = "0" * 64
++    with pytest.raises(AssertionError, match="full_parameter_sha256"):
++        verify_cold_loaded_state(state, bad)
++
++
++def test_http_receiver_requires_success_and_explicit_matching_version(tmp_path):
++    requests = []
++    behavior = {"success": True, "version": "0"}
++    model_path = str(tmp_path.resolve())
++
++    class Handler(BaseHTTPRequestHandler):
++        def log_message(self, *_args):
++            pass
++
++        def do_POST(self):
++            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
++            requests.append((self.path, body))
++            self.send_response(200)
++            self.end_headers()
++            self.wfile.write(json.dumps({"success": behavior["success"], "message": "unit HTTP contract"}).encode())
++
++        def do_GET(self):
++            requests.append((self.path, None))
++            self.send_response(200)
++            self.end_headers()
++            self.wfile.write(json.dumps({"weight_version": behavior["version"], "model_path": model_path}).encode())
++
++    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
++    worker = threading.Thread(target=server.serve_forever, daemon=True)
++    worker.start()
++    url = f"http://127.0.0.1:{server.server_port}"
++    try:
++        receipt = reload_sglang_from_disk(url, model_path, 0, timeout=5)
++        assert receipt["verified"] and receipt["sync"]
++        assert requests[0][0] == "/update_weights_from_disk" and requests[1][0] == "/model_info"
++        assert requests[0][1]["is_async"] is False and requests[0][1]["flush_cache"] is True
++        assert requests[0][1]["weight_version"] == "0"
++        behavior["version"] = "9"
++        with pytest.raises(RuntimeError, match="version differs"):
++            reload_sglang_from_disk(url, model_path, 0, timeout=5)
++        behavior["success"] = False
++        with pytest.raises(RuntimeError, match="rejected"):
++            reload_sglang_from_disk(url, model_path, 0, timeout=5)
++    finally:
++        server.shutdown()
++        server.server_close()
++        worker.join(timeout=5)
++
++
++def test_external_rollout_requires_explicit_custom_function_old_logprobs_and_url(tmp_path):
++    from slime.utils.arguments import get_slime_extra_args_provider
++    from slime.utils.fsdp2_arguments import parse_fsdp2_args
++
++    config = tmp_path / "config.json"
++    config.write_text('{"model_type":"qwen3","num_hidden_layers":2}')
++    common = ["--train-backend", "fsdp2", "--fsdp-random-init", "--fsdp-model-config", str(config),
++              "--rollout-batch-size", "4", "--n-samples-per-prompt", "4", "--num-rollout", "2",
++              "--update-weight-disk-dir", str(tmp_path / "weights")]
++    external = ["--fsdp-external-rollout", "--rollout-function-path", "online_rollout.generate_rollout",
++                "--use-rollout-logprobs", "--train-env-vars", '{"SLIME_FSDP2_SGLANG_URL":"http://127.0.0.1:30000"}']
++    args = parse_fsdp2_args(get_slime_extra_args_provider(), common + external)
++    assert args.fsdp_external_rollout and not args.fsdp_fixed_rollout and args.use_rollout_logprobs
++    assert args.actor_num_gpus_per_node == 8 and args.debug_train_only
++    with pytest.raises(SystemExit):
++        parse_fsdp2_args(get_slime_extra_args_provider(), common + external + ["--fsdp-fixed-rollout"])
++    with pytest.raises(SystemExit):
++        parse_fsdp2_args(get_slime_extra_args_provider(), common + ["--fsdp-external-rollout"])
++
++
++@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
++def test_observer_captures_real_linear_embedding_subclasses_and_compute_dtype(dtype):
++    from slime.backends.fsdp2_utils.precision_audit import ModuleProbe, validate_observations
++
++    # Native FSDP dynamically changes leaf classes while retaining their nn
++    # bases. Exercise the same subclass contract without inventing FSDP state.
++    class DerivedEmbedding(torch.nn.Embedding):
++        pass
++
++    class DerivedLinear(torch.nn.Linear):
++        pass
++
++    class Model(torch.nn.Module):
++        def __init__(self):
++            super().__init__()
++            self.embed_tokens = DerivedEmbedding(32, 16)
++            self.lm_head = DerivedLinear(16, 32, bias=False)
++
++        def forward(self, tokens):
++            return self.lm_head(self.embed_tokens(tokens))
++
++    model = Model().to(dtype=dtype)
++    probe = ModuleProbe(model)
++    try:
++        actual = model(torch.tensor([[1, 2, 3, 4]]))
++        assert actual.dtype == dtype
++        result = validate_observations(probe.records, [], dict(model.named_parameters()),
++                                       "bf16" if dtype == torch.bfloat16 else "fp32", 1)
++        assert result["compute_parameters_observed"] == 2
++        weights = {event["module"] + "." + name: record
++                   for event in probe.records for name, record in event["parameters"].items()}
++        assert set(weights) == {"embed_tokens.weight", "lm_head.weight"}
++        assert all(record["dtype"] == str(dtype) and record["finite"] for record in weights.values())
++        assert any("DerivedEmbedding" in event["module_type"] for event in probe.records)
++        assert any("DerivedLinear" in event["module_type"] for event in probe.records)
++        with pytest.raises(AssertionError, match="observe every parameter"):
++            validate_observations(probe.records, [], [*weights, "deliberately_missing.weight"],
++                                  "bf16" if dtype == torch.bfloat16 else "fp32", 1)
++    finally:
++        probe.close()
++
++
++def test_sensitive_operator_probe_records_real_fp32_internals_without_changing_forward_or_grad():
++    from slime.backends.fsdp2_utils.loss import response_log_probs
++    from slime.backends.fsdp2_utils.precision_audit import OperatorProbe, validate_operator_observations
++
++    model = _tiny_model().to(dtype=torch.bfloat16)
++    # Mirror the actor: master/resident parameters may be FP32 while compute
++    # is BF16; RoPE's sensitive buffers are deliberately retained in FP32.
++    for module in model.modules():
++        for name, value in list(module.named_buffers(recurse=False)):
++            if value.is_floating_point():
++                setattr(module, name, value.float())
++    tokens = torch.tensor([[1, 2, 3, 4, 5]])
++    baseline = response_log_probs(model(input_ids=tokens, use_cache=False).logits, tokens, [5], [2], .7)[0]
++    baseline.sum().backward()
++    expected_gradients = {name: value.grad.clone() for name, value in model.named_parameters()}
++    model.zero_grad(set_to_none=True)
++    probe = OperatorProbe()
++    with probe:
++        actual = response_log_probs(model(input_ids=tokens, use_cache=False).logits, tokens, [5], [2], .7)[0]
++    actual.sum().backward()
++    assert torch.equal(baseline, actual)
++    assert all(torch.equal(expected_gradients[name], value.grad) for name, value in model.named_parameters())
++    assert validate_operator_observations(probe.records)["passed"] is True
++    with pytest.raises(AssertionError, match="incomplete"):
++        validate_operator_observations([])
++    changed = copy.deepcopy(probe.records)
++    changed[0]["inputs"][0]["dtype"] = "torch.bfloat16"
++    with pytest.raises(AssertionError, match="FP32"):
++        validate_operator_observations(changed)
++
++
++def test_response_logprob_audit_uses_existing_detached_values_and_preserves_mask_and_graph():
++    from slime.backends.fsdp2_utils.precision_audit import compare_response_logprobs
++
++    current = torch.tensor([-2., -3., -4.], requires_grad=True)
++    previous = [-2.01, -3.02, -8.]
++    record = compare_response_logprobs(current, previous, [1, 1, 0])
++    assert record["response_tokens"] == 3 and record["valid_tokens"] == 2
++    assert record["all_response_max_abs"] == 4.
++    assert record["valid_response_max_abs"] < .021
++    assert record["loss_mask"] == [1, 1, 0]
++    current.sum().backward()
++    assert torch.equal(current.grad, torch.ones(3))
++    with pytest.raises(AssertionError, match="shapes"):
++        compare_response_logprobs(current, previous[:1], [1, 1, 0])
++    with pytest.raises(AssertionError, match="finite"):
++        compare_response_logprobs(current, [float('nan'), -3, -4], [1, 1, 0])
++
++
++def test_posthoc_tolerance_requires_actual_checkpoint_identity_and_checks_saved_values(tmp_path):
++    from slime.backends.fsdp2_utils.precision_audit import (compare_response_logprobs,
++        evaluate_saved_policy_logprobs, policy_case_fingerprint, validate_logprob_tolerance)
++
++    manifest = {"weight_version": 0, "files": {"model.safetensors": {"sha256": "a" * 64}},
++                "precision_audit": {"full_parameter_sha256": {"example": "b" * 64}}}
++    value = {"schema_version": 1, "metric": "response_token_logprob_max_abs", "acceptance_ready": True,
++             "temperature": .7, "max_abs": .03, "checkpoint_payload_sha256": {"v0": {"model.safetensors": "a" * 64}}}
++    path = tmp_path / "tolerance.json"
++    path.write_text(json.dumps(value))
++    sample = {"prompt_token_ids": [1, 2], "response_token_ids": [3, 4, 5],
++              **compare_response_logprobs(torch.tensor([-2., -3., -4.]), [-2.01, -3.02, -8.], [1, 1, 0])}
++    value["case_fingerprints_sha256"] = [policy_case_fingerprint(sample)]
++    path.write_text(json.dumps(value))
++    records = [{"rank": 0, "step": 1, "microbatch": 0, "accepted_weight_version": 0,
++                "old_logprob_source": "external_rollout_log_probs", "accepted_manifest": manifest,
++                "temperature": .7, "samples": [{"sample_rollout_id": 0, **sample}],
++                "world_size": 1, "expected_microbatches": 1, "global_batch_size": 1}]
++    result = evaluate_saved_policy_logprobs(records, path, expected_world_size=1, expected_steps=1)
++    assert result["passed"] and result["records"][0]["valid_tokens"] == 2
++    value["max_abs"] = .001
++    path.write_text(json.dumps(value))
++    assert not evaluate_saved_policy_logprobs(records, path, expected_world_size=1, expected_steps=1)["passed"]
++    with pytest.raises(AssertionError, match="temperature"):
++        validate_logprob_tolerance(path, 1., manifest)
++    changed = copy.deepcopy(records)
++    changed[0]["samples"][0]["difference"][0] = 0.
++    with pytest.raises(AssertionError, match="inconsistent"):
++        evaluate_saved_policy_logprobs(changed, path, expected_world_size=1, expected_steps=1)
++    value["checkpoint_payload_sha256"]["v0"]["model.safetensors"] = "c" * 64
++    path.write_text(json.dumps(value))
++    with pytest.raises(AssertionError, match="this accepted checkpoint"):
++        evaluate_saved_policy_logprobs(records, path, expected_world_size=1, expected_steps=1)
++    with pytest.raises(AssertionError, match="No actual"):
++        evaluate_saved_policy_logprobs([], path)
++
++
++    with pytest.raises(AssertionError, match="every expected optimizer step"):
++        evaluate_saved_policy_logprobs(records, path, expected_world_size=1, expected_steps=2)
++    with pytest.raises(AssertionError, match="every actual training rank"):
++        evaluate_saved_policy_logprobs(records, path, expected_world_size=8, expected_steps=1)
++    with pytest.raises(AssertionError, match="missing or duplicate"):
++        evaluate_saved_policy_logprobs(records + records, path, expected_world_size=1, expected_steps=1)
++
++
++    value["checkpoint_payload_sha256"]["v0"]["model.safetensors"] = "a" * 64
++    value["case_fingerprints_sha256"] = ["0" * 64]
++    path.write_text(json.dumps(value))
++    with pytest.raises(AssertionError, match="case was not independently HF calibrated"):
++        evaluate_saved_policy_logprobs(records, path, expected_world_size=1, expected_steps=1)
++    assert policy_case_fingerprint({**sample, "loss_mask": [1., 1., 0.]}) == policy_case_fingerprint(sample)

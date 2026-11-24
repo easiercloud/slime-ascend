@@ -252,3 +252,13 @@ summary = "Dense FSDPTurbo Ray actor, response GRPO loss and versioned verified 
 issue = "SLIME-FSDP2-GRPO"
 base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
 sha256 = "465c249891d5a77b14a275116bd83fa73afed57cc2600787084f0b841b71b252"
+
+[[patches]]
+id = "slime:features:fsdp2-precision-audit"
+category = "features"
+target = "slime"
+file = "fsdp2-precision-audit.patch"
+summary = "Audit live training dtypes and full HF weight bytes; support external SGLang rollout and synchronous weight acceptance"
+issue = "SLIME-FSDP2-PRECISION"
+base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
+sha256 = "4c245f986a8a33a0d8a34200b03621df54efdcdc0e2e1ba863aec5afed3f17ef"
