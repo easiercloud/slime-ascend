@@ -1,7 +1,7 @@
-From efac1394638c88d4f64f56cebb86971beafff09b Mon Sep 17 00:00:00 2001
+From 5e3b77d44b6ffe94a22a70517dc01a9dce8f5749 Mon Sep 17 00:00:00 2001
 From: weixin_51503402 <wangbingxuan@huawei.com>
 Date: Fri, 27 Nov 2026 23:15:09 +0800
-Subject: [PATCH 2/3] feat(fsdpturbo): add fixed-rollout GRPO training, online
+Subject: [PATCH] feat(fsdpturbo): add fixed-rollout GRPO training, online
  weight publication and sharded checkpoint
 
 Add fixed-rollout GRPO actor updates through BatchBuilder, HF disk weight
@@ -782,7 +782,7 @@ index 00000000..a78ede7f
 +    return loss, metrics
 diff --git a/slime/backends/fsdp_utils/grpo_check.py b/slime/backends/fsdp_utils/grpo_check.py
 new file mode 100644
-index 00000000..040bdecf
+index 00000000..6e3d1fab
 --- /dev/null
 +++ b/slime/backends/fsdp_utils/grpo_check.py
 @@ -0,0 +1,167 @@
@@ -801,7 +801,7 @@ index 00000000..040bdecf
 +from torch.distributed.tensor import DTensor
 +
 +from slime.utils import accelerator
-+from .model import load_qwen3
++from .model import load_model
 +from .model_check import Comparison
 +
 +
@@ -831,8 +831,8 @@ index 00000000..040bdecf
 +        self.rank, self.world = dist.get_rank(), dist.get_world_size()
 +        self.device = torch.device(accelerator.device_type(), accelerator.current_device())
 +        print(f"[grpo-check rank={self.rank}] independent unsharded reference", flush=True)
-+        self.reference = load_qwen3(args.hf_checkpoint, torch.bfloat16).to(self.device)
-+        self.master = load_qwen3(args.hf_checkpoint, torch.float32).to(self.device)
++        self.reference = load_model(args.hf_checkpoint, torch.bfloat16).to(self.device)
++        self.master = load_model(args.hf_checkpoint, torch.float32).to(self.device)
 +        self.optimizer = torch.optim.AdamW(self.master.parameters(), lr=args.lr,
 +                                          betas=(args.fsdp_adam_beta1, args.fsdp_adam_beta2),
 +                                          eps=args.fsdp_adam_eps, weight_decay=args.fsdp_weight_decay, foreach=False)
@@ -1183,7 +1183,7 @@ index 00000000..7300930c
 +    return {**exports[0], "engine_versions": versions, "acknowledgements": replies}
 diff --git a/slime/backends/fsdp_utils/trainer.py b/slime/backends/fsdp_utils/trainer.py
 new file mode 100644
-index 00000000..c297c561
+index 00000000..c4f5b17f
 --- /dev/null
 +++ b/slime/backends/fsdp_utils/trainer.py
 @@ -0,0 +1,161 @@
@@ -1199,7 +1199,7 @@ index 00000000..c297c561
 +from slime.utils.distributed_utils import get_gloo_group
 +
 +from .grpo import collate, microbatch_loss, response_log_probs, validate_batch
-+from .model import load_qwen3, wrap_qwen3
++from .model import load_model, wrap_model
 +
 +
 +def collective_validate(data, args, vocab_size):
@@ -1278,8 +1278,8 @@ index 00000000..c297c561
 +
 +        set_accelerator_compatible()
 +        self.args = args
-+        self.model = load_qwen3(args.hf_checkpoint, torch.float32)
-+        self.turbo = wrap_qwen3(self.model, dist.get_world_size())
++        self.model = load_model(args.hf_checkpoint, torch.float32)
++        self.turbo = wrap_model(self.model, dist.get_world_size())
 +        self.optimizer = make_optimizer(self.model.parameters(), args)
 +        self.optimizer_steps = 0
 +        self.last_rollout_id = None

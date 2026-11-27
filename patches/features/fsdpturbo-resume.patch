@@ -1,8 +1,8 @@
-From 3cbc223e2de104604e51a51e5fa5f73343b43a0d Mon Sep 17 00:00:00 2001
+From 940bb0e5be25cd4ca6ba5330a923bbcca4b16623 Mon Sep 17 00:00:00 2001
 From: weixin_51503402 <wangbingxuan@huawei.com>
 Date: Fri, 27 Nov 2026 23:15:09 +0800
-Subject: [PATCH 3/3] feat(fsdpturbo): add synchronous training, joint
- checkpoint resume and acceptance decoupling
+Subject: [PATCH] feat(fsdpturbo): add synchronous training, joint checkpoint
+ resume and acceptance decoupling
 
 Add synchronous object-store training with joint trainer and data cursor
 resume, and decouple acceptance-only check helpers from the production
@@ -11,16 +11,16 @@ synchronous-training path into an observability audit module.
  slime/backends/fsdp_utils/actor.py       |  10 +-
  slime/backends/fsdp_utils/arguments.py   |  66 +++++++--
  slime/backends/fsdp_utils/audit.py       |  43 ++++++
- slime/backends/fsdp_utils/model.py       |  25 ----
- slime/backends/fsdp_utils/model_check.py |  27 +++-
+ slime/backends/fsdp_utils/model.py       |  70 ++++-----
+ slime/backends/fsdp_utils/model_check.py |  35 ++++-
  slime/backends/fsdp_utils/resume.py      | 177 ++++++++++++++++++++++
  slime/data/checkpoint.py                 |  11 +-
  slime/ray/actor_group.py                 |   2 +-
  slime/ray/placement_group.py             |   7 +
- tests/test_fsdp_model.py                 |   3 +-
+ tests/test_fsdp_model.py                 |  11 +-
  tests/test_fsdp_resume.py                | 181 +++++++++++++++++++++++
  train.py                                 |  19 ++-
- 12 files changed, 521 insertions(+), 50 deletions(-)
+ 12 files changed, 566 insertions(+), 66 deletions(-)
  create mode 100644 slime/backends/fsdp_utils/audit.py
  create mode 100644 slime/backends/fsdp_utils/resume.py
  create mode 100644 tests/test_fsdp_resume.py
@@ -257,32 +257,98 @@ index 00000000..622790ed
 +        self.write()
 \ No newline at end of file
 diff --git a/slime/backends/fsdp_utils/model.py b/slime/backends/fsdp_utils/model.py
-index ceae7c3f..06ab8fcc 100644
+index ceae7c3f..0c901c23 100644
 --- a/slime/backends/fsdp_utils/model.py
 +++ b/slime/backends/fsdp_utils/model.py
-@@ -6,9 +6,6 @@ This module owns no rollout, checkpoint export or GRPO policy.
+@@ -1,26 +1,50 @@
+-"""Conservative Qwen3 model loading and native FSDP2 through FSDPTurbo.
++"""Model loading and native FSDP2 through FSDPTurbo.
+ 
+ Provider and Transformers imports stay lazy to preserve the serving interpreter.
+-This module owns no rollout, checkpoint export or GRPO policy.
++This module owns no rollout, checkpoint export or GRPO policy. Architecture
++differences are dispatched on ``config.model_type`` via the small ``MODEL_SPECS``
++registry, mirroring the Megatron backend's ``hf_to_megatron`` loader table.
+ """
  
  from pathlib import Path
  
 -import torch
 -import torch.nn.functional as F
--
++# Per-architecture differences needed for the model milestone. The loader itself
++# is architecture-agnostic (``AutoModelForCausalLM``); only the FSDP layer path
++# and tied-embedding access vary. Models sharing a spec reuse the same entry.
++_MODEL_SPECS = {
++    "llama": {"layer_path": "model.layers.{*}", "tie": ("model.embed_tokens", "lm_head")},
++    "qwen2": {"layer_path": "model.layers.{*}", "tie": ("model.embed_tokens", "lm_head")},
++    "qwen3": {"layer_path": "model.layers.{*}", "tie": ("model.embed_tokens", "lm_head")},
++}
  
- def load_qwen3(checkpoint, dtype):
+ 
+-def load_qwen3(checkpoint, dtype):
++def _resolve_spec(config):
++    try:
++        return _MODEL_SPECS[config.model_type]
++    except KeyError as exc:
++        raise ValueError(f"Unsupported HuggingFace model type: {config.model_type}") from exc
++
++
++def tied_embeddings(model):
++    """True when the decoder's input and output embeddings share storage."""
++    embed_path, head_path = _resolve_spec(model.config)["tie"]
++    embed = model
++    for part in embed_path.split("."):
++        embed = getattr(embed, part)
++    head = model
++    for part in head_path.split("."):
++        head = getattr(head, part)
++    return embed.weight is head.weight
++
++
++def load_model(checkpoint, dtype):
      from transformers import AutoConfig, AutoModelForCausalLM
-@@ -19,8 +16,6 @@ def load_qwen3(checkpoint, dtype):
+ 
+     checkpoint = Path(checkpoint)
+     if not (checkpoint / "config.json").is_file():
+         raise ValueError("Expected a local Hugging Face checkpoint with config.json")
      config = AutoConfig.from_pretrained(checkpoint, local_files_only=True, trust_remote_code=False)
-     if config.model_type != "qwen3":
-         raise ValueError(f"This model milestone supports dense qwen3 only, got {config.model_type}")
+-    if config.model_type != "qwen3":
+-        raise ValueError(f"This model milestone supports dense qwen3 only, got {config.model_type}")
 -    if config.attention_dropout != 0:
 -        raise ValueError("Deterministic model validation requires attention_dropout=0")
++    _resolve_spec(config)
      config.use_cache = False
      model, info = AutoModelForCausalLM.from_pretrained(
          checkpoint, config=config, dtype=dtype, attn_implementation="eager",
-@@ -52,23 +47,3 @@ def wrap_qwen3(model, world_size):
+@@ -31,44 +55,24 @@ def load_qwen3(checkpoint, dtype):
+             raise ValueError(f"Incomplete checkpoint loading: {key}={info[key]}")
+     if any(t.is_meta for t in (*model.parameters(), *model.buffers())):
+         raise ValueError("Checkpoint loading left meta tensors")
+-    if config.tie_word_embeddings and model.model.embed_tokens.weight is not model.lm_head.weight:
++    if config.tie_word_embeddings and not tied_embeddings(model):
+         raise ValueError("Checkpoint loading did not preserve tied embeddings")
+     return model.train()
+ 
+ 
+-def wrap_qwen3(model, world_size):
++def wrap_model(model, world_size):
+     from fsdp_turbo.fsdp_turbo import FSDPTurbo
+     from fsdp_turbo.fsdp_turbo_config import DistributedConfig, FSDPPlanConfig, FSDPTurboConfig
+ 
++    layer_path = _resolve_spec(model.config)["layer_path"]
+     # Decoder layers are separate units; tied embedding/head belong to root.
+     config = FSDPTurboConfig(distributed=DistributedConfig(
+         data_parallel_size=1, fully_shard_parallel_size=world_size,
+         tensor_parallel_size=1, expert_parallel_size=1,
+         fsdp_plan=FSDPPlanConfig(
+-            apply_modules={"model.layers.{*}": {}}, fsdp_implementation="native",
++            apply_modules={layer_path: {}}, fsdp_implementation="native",
+             param_dtype="bf16", reduce_dtype="fp32", cpu_offload=False,
+             num_to_forward_prefetch=0, num_to_backward_prefetch=0,
+         ),
      ))
      return FSDPTurbo(config, model)
- 
+-
 -
 -def causal_loss_sum(logits, input_ids, attention_mask):
 -    """Sum next-token CE over valid adjacent tokens; padding contributes zero."""
@@ -304,7 +370,7 @@ index ceae7c3f..06ab8fcc 100644
 -    return torch.optim.AdamW(parameters, lr=1e-4, betas=(0.9, 0.999), eps=1e-6,
 -                             weight_decay=0.01, foreach=False)
 diff --git a/slime/backends/fsdp_utils/model_check.py b/slime/backends/fsdp_utils/model_check.py
-index 4b37fc49..19e913b1 100644
+index 4b37fc49..0856f7c3 100644
 --- a/slime/backends/fsdp_utils/model_check.py
 +++ b/slime/backends/fsdp_utils/model_check.py
 @@ -10,12 +10,12 @@ import math
@@ -318,7 +384,7 @@ index 4b37fc49..19e913b1 100644
  from slime.utils import accelerator
 -from .model import (causal_loss_sum, globally_normalized_loss, load_qwen3,
 -                    make_check_optimizer, wrap_qwen3)
-+from .model import load_qwen3, wrap_qwen3
++from .model import load_model, tied_embeddings, wrap_model
  
  
  class Comparison:
@@ -350,15 +416,37 @@ index 4b37fc49..19e913b1 100644
  def check_model(args):
      from fsdp_turbo.utils.device import set_accelerator_compatible
  
-@@ -65,6 +86,8 @@ def check_model(args):
+@@ -64,7 +85,9 @@ def check_model(args):
+     dist.all_reduce(count)
      total_tokens = int(count.item())
      print(f"[model-check rank={rank}] loading unsharded reference", flush=True)
-     reference = load_qwen3(args.hf_checkpoint, torch.bfloat16).to(device)
+-    reference = load_qwen3(args.hf_checkpoint, torch.bfloat16).to(device)
++    reference = load_model(args.hf_checkpoint, torch.bfloat16).to(device)
 +    if reference.config.attention_dropout != 0:
 +        raise ValueError("Deterministic model validation requires attention_dropout=0")
      ref_logits = reference(input_ids=ids, attention_mask=mask, use_cache=False).logits
      ref_sum, _ = causal_loss_sum(ref_logits, ids, mask)
      globally_normalized_loss(ref_sum, total_tokens, world).backward()
+@@ -98,8 +121,8 @@ def check_model(args):
+     del ref_optimizer
+     gc.collect()
+     print(f"[model-check rank={rank}] loading FP32 master weights and wrapping FSDP", flush=True)
+-    model = load_qwen3(args.hf_checkpoint, torch.float32)
+-    turbo = wrap_qwen3(model, world)
++    model = load_model(args.hf_checkpoint, torch.float32)
++    turbo = wrap_model(model, world)
+     parameters = dict(model.named_parameters())
+     if set(parameters) != set(initial):
+         raise ValueError("Wrapping changed unique parameter names")
+@@ -108,7 +131,7 @@ def check_model(args):
+         raise ValueError("Expected all parameters to be DTensors")
+     local_numel = sum(p.to_local().numel() for p in parameters.values())
+     units = sum(isinstance(module, FSDPModule) for module in model.modules())
+-    tied = model.model.embed_tokens.weight is model.lm_head.weight
++    tied = tied_embeddings(model)
+     initial_comparison = Comparison()
+     for name, parameter in parameters.items():
+         initial_comparison.add(parameter.full_tensor(), initial[name])
 diff --git a/slime/backends/fsdp_utils/resume.py b/slime/backends/fsdp_utils/resume.py
 new file mode 100644
 index 00000000..27b64049
@@ -617,7 +705,7 @@ index 7f081201..7b352ec8 100644
          logger.info("%s serving session %s", "Reusing" if reused else "Created", name)
      num_rollout_per_epoch = None
 diff --git a/tests/test_fsdp_model.py b/tests/test_fsdp_model.py
-index ca72b6a1..e7bc16df 100644
+index ca72b6a1..24950345 100644
 --- a/tests/test_fsdp_model.py
 +++ b/tests/test_fsdp_model.py
 @@ -4,7 +4,8 @@ import pytest
@@ -625,11 +713,26 @@ index ca72b6a1..e7bc16df 100644
  import torch.nn.functional as F
  
 -from slime.backends.fsdp_utils.model import causal_loss_sum, globally_normalized_loss, load_qwen3
-+from slime.backends.fsdp_utils.model import load_qwen3
++from slime.backends.fsdp_utils.model import load_model
 +from slime.backends.fsdp_utils.model_check import causal_loss_sum, globally_normalized_loss
  
  
  def test_variable_length_gradients_match_global_token_mean():
+@@ -31,10 +32,10 @@ def test_empty_batch_is_rejected():
+ 
+ def test_loading_requires_local_checkpoint(tmp_path):
+     with pytest.raises(ValueError, match="local"):
+-        load_qwen3(tmp_path, torch.float32)
++        load_model(tmp_path, torch.float32)
+ 
+ 
+ def test_loading_rejects_unvalidated_architecture(tmp_path):
+-    (tmp_path / "config.json").write_text('{"model_type": "llama"}')
+-    with pytest.raises(ValueError, match="dense qwen3 only"):
+-        load_qwen3(tmp_path, torch.float32)
++    (tmp_path / "config.json").write_text('{"model_type": "gpt2"}')
++    with pytest.raises(ValueError, match="Unsupported HuggingFace model type"):
++        load_model(tmp_path, torch.float32)
 diff --git a/tests/test_fsdp_resume.py b/tests/test_fsdp_resume.py
 new file mode 100644
 index 00000000..a6473b50
