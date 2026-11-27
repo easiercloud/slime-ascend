@@ -1,19 +1,27 @@
-From 8425e03daf03bf0a65b41ae5616bcb4daffc67bb Mon Sep 17 00:00:00 2001
+From 190e0c66a98b75f349005ec6fc398b121e354f59 Mon Sep 17 00:00:00 2001
 From: WBiXin <wangbingxuan@huawei.com>
 Date: Sun, 22 Nov 2026 22:23:29 +0800
-Subject: [PATCH] Add FSDPTurbo synchronous training and joint data checkpoint
- resume
+Subject: [PATCH 3/3] feat(fsdpturbo): add synchronous training, joint
+ checkpoint resume and acceptance decoupling
 
+Add synchronous object-store training with joint trainer and data cursor
+resume, and decouple acceptance-only check helpers from the production
+synchronous-training path into an observability audit module.
 ---
- slime/backends/fsdp_utils/actor.py     |  10 +-
- slime/backends/fsdp_utils/arguments.py |  51 ++++--
- slime/backends/fsdp_utils/resume.py    | 209 +++++++++++++++++++++++++
- slime/data/checkpoint.py               |  11 +-
- slime/ray/actor_group.py               |   2 +-
- slime/ray/placement_group.py           |   7 +
- tests/test_fsdp_resume.py              | 181 +++++++++++++++++++++
- train.py                               |  19 ++-
- 8 files changed, 473 insertions(+), 17 deletions(-)
+ slime/backends/fsdp_utils/actor.py       |  10 +-
+ slime/backends/fsdp_utils/arguments.py   |  51 +++++--
+ slime/backends/fsdp_utils/audit.py       |  43 ++++++
+ slime/backends/fsdp_utils/model.py       |  25 ----
+ slime/backends/fsdp_utils/model_check.py |  27 +++-
+ slime/backends/fsdp_utils/resume.py      | 177 ++++++++++++++++++++++
+ slime/data/checkpoint.py                 |  11 +-
+ slime/ray/actor_group.py                 |   2 +-
+ slime/ray/placement_group.py             |   7 +
+ tests/test_fsdp_model.py                 |   3 +-
+ tests/test_fsdp_resume.py                | 181 +++++++++++++++++++++++
+ train.py                                 |  19 ++-
+ 12 files changed, 511 insertions(+), 45 deletions(-)
+ create mode 100644 slime/backends/fsdp_utils/audit.py
  create mode 100644 slime/backends/fsdp_utils/resume.py
  create mode 100644 tests/test_fsdp_resume.py
 
@@ -184,12 +192,165 @@ index b5878992..06c6beb9 100644
 +        args.start_rollout_id = requested_start
 +        resolve(args)
      return args, restore_plan
+diff --git a/slime/backends/fsdp_utils/audit.py b/slime/backends/fsdp_utils/audit.py
+new file mode 100644
+index 00000000..622790ed
+--- /dev/null
++++ b/slime/backends/fsdp_utils/audit.py
+@@ -0,0 +1,43 @@
++"""Driver-side durable audit of the synchronous training main loop.
++
++Separated from resume.py so the checkpoint/data-cursor boundary logic stays
++free of observability concerns. SyncReport only writes an audit JSON; it never
++participates in training decisions.
++"""
++
++import os
++from pathlib import Path
++
++from .resume import atomic_json
++
++
++class SyncReport:
++    """Small durable audit of the existing main loop, including failed attempts."""
++
++    def __init__(self, args, group):
++        import ray
++
++        self.path = Path(args.fsdp_init_report)
++        self.value = {"passed": False, "driver_pid": os.getpid(), "start_rollout_id": args.start_rollout_id,
++                      "num_rollout": args.num_rollout, "load": args.load, "save": args.save,
++                      "initial_progress": ray.get([actor.training_progress.remote() for actor in group._actor_handlers]),
++                      "publications": [], "rollouts": []}
++        self.write()
++
++    def write(self):
++        atomic_json(self.path, self.value, replace=True)
++
++    def publish(self, publication):
++        self.value["publications"].append(publication)
++        self.write()
++
++    def trained(self, rollout_id, training):
++        self.value["rollouts"].append({"rollout_id": rollout_id, "training": training})
++        self.write()
++
++    def finish(self, group):
++        import ray
++
++        self.value["final_progress"] = ray.get([actor.training_progress.remote() for actor in group._actor_handlers])
++        self.value["passed"] = True
++        self.write()
+\ No newline at end of file
+diff --git a/slime/backends/fsdp_utils/model.py b/slime/backends/fsdp_utils/model.py
+index ceae7c3f..06ab8fcc 100644
+--- a/slime/backends/fsdp_utils/model.py
++++ b/slime/backends/fsdp_utils/model.py
+@@ -6,9 +6,6 @@ This module owns no rollout, checkpoint export or GRPO policy.
+ 
+ from pathlib import Path
+ 
+-import torch
+-import torch.nn.functional as F
+-
+ 
+ def load_qwen3(checkpoint, dtype):
+     from transformers import AutoConfig, AutoModelForCausalLM
+@@ -19,8 +16,6 @@ def load_qwen3(checkpoint, dtype):
+     config = AutoConfig.from_pretrained(checkpoint, local_files_only=True, trust_remote_code=False)
+     if config.model_type != "qwen3":
+         raise ValueError(f"This model milestone supports dense qwen3 only, got {config.model_type}")
+-    if config.attention_dropout != 0:
+-        raise ValueError("Deterministic model validation requires attention_dropout=0")
+     config.use_cache = False
+     model, info = AutoModelForCausalLM.from_pretrained(
+         checkpoint, config=config, dtype=dtype, attn_implementation="eager",
+@@ -52,23 +47,3 @@ def wrap_qwen3(model, world_size):
+     ))
+     return FSDPTurbo(config, model)
+ 
+-
+-def causal_loss_sum(logits, input_ids, attention_mask):
+-    """Sum next-token CE over valid adjacent tokens; padding contributes zero."""
+-    valid = attention_mask[:, 1:].bool() & attention_mask[:, :-1].bool()
+-    labels = input_ids[:, 1:].masked_fill(~valid, -100)
+-    return F.cross_entropy(logits[:, :-1].float().reshape(-1, logits.size(-1)),
+-                           labels.reshape(-1), ignore_index=-100, reduction="sum"), valid.sum()
+-
+-
+-def globally_normalized_loss(loss_sum, global_tokens, world_size):
+-    """Compensate FSDP's mean gradient reduction for variable token counts."""
+-    if global_tokens <= 0:
+-        raise ValueError("A training batch must contain at least one valid next-token target")
+-    return loss_sum * (world_size / global_tokens)
+-
+-
+-def make_check_optimizer(parameters):
+-    """Fixed acceptance-test optimizer; production optimizer policy is future work."""
+-    return torch.optim.AdamW(parameters, lr=1e-4, betas=(0.9, 0.999), eps=1e-6,
+-                             weight_decay=0.01, foreach=False)
+diff --git a/slime/backends/fsdp_utils/model_check.py b/slime/backends/fsdp_utils/model_check.py
+index 4b37fc49..19e913b1 100644
+--- a/slime/backends/fsdp_utils/model_check.py
++++ b/slime/backends/fsdp_utils/model_check.py
+@@ -10,12 +10,12 @@ import math
+ 
+ import torch
+ import torch.distributed as dist
++import torch.nn.functional as F
+ from torch.distributed.tensor import DTensor
+ from torch.distributed.fsdp import FSDPModule
+ 
+ from slime.utils import accelerator
+-from .model import (causal_loss_sum, globally_normalized_loss, load_qwen3,
+-                    make_check_optimizer, wrap_qwen3)
++from .model import load_qwen3, wrap_qwen3
+ 
+ 
+ class Comparison:
+@@ -50,6 +50,27 @@ def fixed_batch(rank, device):
+     return ids, mask.long()
+ 
+ 
++def causal_loss_sum(logits, input_ids, attention_mask):
++    """Sum next-token CE over valid adjacent tokens; padding contributes zero."""
++    valid = attention_mask[:, 1:].bool() & attention_mask[:, :-1].bool()
++    labels = input_ids[:, 1:].masked_fill(~valid, -100)
++    return F.cross_entropy(logits[:, :-1].float().reshape(-1, logits.size(-1)),
++                           labels.reshape(-1), ignore_index=-100, reduction="sum"), valid.sum()
++
++
++def globally_normalized_loss(loss_sum, global_tokens, world_size):
++    """Compensate FSDP's mean gradient reduction for variable token counts."""
++    if global_tokens <= 0:
++        raise ValueError("A training batch must contain at least one valid next-token target")
++    return loss_sum * (world_size / global_tokens)
++
++
++def make_check_optimizer(parameters):
++    """Fixed acceptance-test optimizer; production optimizer policy is future work."""
++    return torch.optim.AdamW(parameters, lr=1e-4, betas=(0.9, 0.999), eps=1e-6,
++                             weight_decay=0.01, foreach=False)
++
++
+ def check_model(args):
+     from fsdp_turbo.utils.device import set_accelerator_compatible
+ 
+@@ -65,6 +86,8 @@ def check_model(args):
+     total_tokens = int(count.item())
+     print(f"[model-check rank={rank}] loading unsharded reference", flush=True)
+     reference = load_qwen3(args.hf_checkpoint, torch.bfloat16).to(device)
++    if reference.config.attention_dropout != 0:
++        raise ValueError("Deterministic model validation requires attention_dropout=0")
+     ref_logits = reference(input_ids=ids, attention_mask=mask, use_cache=False).logits
+     ref_sum, _ = causal_loss_sum(ref_logits, ids, mask)
+     globally_normalized_loss(ref_sum, total_tokens, world).backward()
 diff --git a/slime/backends/fsdp_utils/resume.py b/slime/backends/fsdp_utils/resume.py
 new file mode 100644
-index 00000000..ae23067e
+index 00000000..27b64049
 --- /dev/null
 +++ b/slime/backends/fsdp_utils/resume.py
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,177 @@
 +"""Driver-side commit of a synchronous trainer checkpoint and Slime data cursor.
 +
 +The existing RolloutDataSource owns cursor serialization. This module only binds
@@ -367,38 +528,6 @@ index 00000000..ae23067e
 +    weights = Path(args.update_weight_disk_dir)
 +    versions = [int(p.name[8:]) for p in weights.glob("weight_v*") if p.name[8:].isdigit()]
 +    args.update_weight_start_version = max([args.update_weight_start_version, *versions])
-+
-+
-+class SyncReport:
-+    """Small durable audit of the existing main loop, including failed attempts."""
-+
-+    def __init__(self, args, group):
-+        import ray
-+
-+        self.path = Path(args.fsdp_init_report)
-+        self.value = {"passed": False, "driver_pid": os.getpid(), "start_rollout_id": args.start_rollout_id,
-+                      "num_rollout": args.num_rollout, "load": args.load, "save": args.save,
-+                      "initial_progress": ray.get([actor.training_progress.remote() for actor in group._actor_handlers]),
-+                      "publications": [], "rollouts": []}
-+        self.write()
-+
-+    def write(self):
-+        atomic_json(self.path, self.value, replace=True)
-+
-+    def publish(self, publication):
-+        self.value["publications"].append(publication)
-+        self.write()
-+
-+    def trained(self, rollout_id, training):
-+        self.value["rollouts"].append({"rollout_id": rollout_id, "training": training})
-+        self.write()
-+
-+    def finish(self, group):
-+        import ray
-+
-+        self.value["final_progress"] = ray.get([actor.training_progress.remote() for actor in group._actor_handlers])
-+        self.value["passed"] = True
-+        self.write()
 diff --git a/slime/data/checkpoint.py b/slime/data/checkpoint.py
 index 03b1eede..370bda61 100644
 --- a/slime/data/checkpoint.py
@@ -473,6 +602,20 @@ index 7f081201..7b352ec8 100644
          args = startup.args = resume.apply(args)
          logger.info("%s serving session %s", "Reusing" if reused else "Created", name)
      num_rollout_per_epoch = None
+diff --git a/tests/test_fsdp_model.py b/tests/test_fsdp_model.py
+index ca72b6a1..e7bc16df 100644
+--- a/tests/test_fsdp_model.py
++++ b/tests/test_fsdp_model.py
+@@ -4,7 +4,8 @@ import pytest
+ import torch
+ import torch.nn.functional as F
+ 
+-from slime.backends.fsdp_utils.model import causal_loss_sum, globally_normalized_loss, load_qwen3
++from slime.backends.fsdp_utils.model import load_qwen3
++from slime.backends.fsdp_utils.model_check import causal_loss_sum, globally_normalized_loss
+ 
+ 
+ def test_variable_length_gradients_match_global_token_mean():
 diff --git a/tests/test_fsdp_resume.py b/tests/test_fsdp_resume.py
 new file mode 100644
 index 00000000..a6473b50
@@ -661,7 +804,7 @@ index 00000000..a6473b50
 +    assert ids(actual) == ids(expected)
 +    assert restored.state_dict() == original.state_dict()
 diff --git a/train.py b/train.py
-index a73872e7..83b8a4fd 100644
+index a73872e7..5757da4a 100644
 --- a/train.py
 +++ b/train.py
 @@ -14,12 +14,19 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
@@ -670,7 +813,7 @@ index a73872e7..83b8a4fd 100644
      actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
 +    sync_report = None
 +    if getattr(args, "fsdp_sync_train", False):
-+        from slime.backends.fsdp_utils.resume import SyncReport
++        from slime.backends.fsdp_utils.audit import SyncReport
 +
 +        sync_report = SyncReport(args, actor_model)
  
@@ -717,5 +860,5 @@ index a73872e7..83b8a4fd 100644
  
  def main(args, restore_plan):
 -- 
-2.54.0
+2.43.0
 
