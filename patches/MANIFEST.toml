@@ -81,7 +81,7 @@ file = "fsdpturbo-backend.patch"
 summary = "FSDPTurbo独立参数入口、Ray训练Actor环境隔离、Qwen3模型加载与FSDP2数值验收"
 issue = "local:fsdpturbo-backend"
 base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
-sha256 = "b4c02019b57208c437e01d168fecce2bc209a75ea4138be8a99a42b09746396a"
+sha256 = "8fdc04ba9cd7159279fc7b663ec29ef0e522a5488d0ecc2613250f628287b8dd"
 
 [[patches]]
 id = "slime:features:fsdpturbo-training"
@@ -91,7 +91,7 @@ file = "fsdpturbo-training.patch"
 summary = "Fixed-rollout GRPO训练、在线HF权重发布与SGLang集成，以及分片模型/AdamW checkpoint"
 issue = "local:fsdpturbo-training"
 base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
-sha256 = "b773c94df7be6566004573db054cf487fdae6ccc9cc280b75dde3f0995b9005a"
+sha256 = "9751aecedd6740843b31c93872fbd0ca27d2685061322b416197fab5a16f2ff4"
 
 [[patches]]
 id = "slime:features:fsdpturbo-resume"
@@ -101,7 +101,7 @@ file = "fsdpturbo-resume.patch"
 summary = "同步训练、联合checkpoint resume，并将验收检查去耦到observability审计模块"
 issue = "local:fsdpturbo-resume"
 base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
-sha256 = "ae7cd67bade8c9fb6afb0122f86b34298f6d5f111517906bc7f78cfa806001c0"
+sha256 = "b179c1b4ae6f3b639f7831349ee119a60659373c39683ec4334116627e2625ee"
 
 [[patches]]
 id = "mbridge:npu-device"

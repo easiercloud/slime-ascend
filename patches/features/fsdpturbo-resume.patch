@@ -1,6 +1,6 @@
-From 190e0c66a98b75f349005ec6fc398b121e354f59 Mon Sep 17 00:00:00 2001
-From: WBiXin <wangbingxuan@huawei.com>
-Date: Sun, 22 Nov 2026 22:23:29 +0800
+From 3cbc223e2de104604e51a51e5fa5f73343b43a0d Mon Sep 17 00:00:00 2001
+From: weixin_51503402 <wangbingxuan@huawei.com>
+Date: Fri, 27 Nov 2026 23:15:09 +0800
 Subject: [PATCH 3/3] feat(fsdpturbo): add synchronous training, joint
  checkpoint resume and acceptance decoupling
 
@@ -9,7 +9,7 @@ resume, and decouple acceptance-only check helpers from the production
 synchronous-training path into an observability audit module.
 ---
  slime/backends/fsdp_utils/actor.py       |  10 +-
- slime/backends/fsdp_utils/arguments.py   |  51 +++++--
+ slime/backends/fsdp_utils/arguments.py   |  66 +++++++--
  slime/backends/fsdp_utils/audit.py       |  43 ++++++
  slime/backends/fsdp_utils/model.py       |  25 ----
  slime/backends/fsdp_utils/model_check.py |  27 +++-
@@ -20,7 +20,7 @@ synchronous-training path into an observability audit module.
  tests/test_fsdp_model.py                 |   3 +-
  tests/test_fsdp_resume.py                | 181 +++++++++++++++++++++++
  train.py                                 |  19 ++-
- 12 files changed, 511 insertions(+), 45 deletions(-)
+ 12 files changed, 521 insertions(+), 50 deletions(-)
  create mode 100644 slime/backends/fsdp_utils/audit.py
  create mode 100644 slime/backends/fsdp_utils/resume.py
  create mode 100644 tests/test_fsdp_resume.py
@@ -61,10 +61,10 @@ index bd91dff5..83f81a05 100644
          raise NotImplementedError("FSDP offload is not supported")
  
 diff --git a/slime/backends/fsdp_utils/arguments.py b/slime/backends/fsdp_utils/arguments.py
-index b5878992..06c6beb9 100644
+index b5878992..e72681d5 100644
 --- a/slime/backends/fsdp_utils/arguments.py
 +++ b/slime/backends/fsdp_utils/arguments.py
-@@ -13,11 +13,12 @@ def validate_fsdp_args(args):
+@@ -13,15 +13,20 @@ def validate_fsdp_args(args):
      grpo_check = getattr(args, "fsdp_grpo_check", False)
      online_check = getattr(args, "fsdp_online_check", False)
      checkpoint_check = getattr(args, "fsdp_checkpoint_check", False)
@@ -76,11 +76,21 @@ index b5878992..06c6beb9 100644
      if args.fsdp_init_report is None:
          raise ValueError("FSDP checks require --fsdp-init-report")
 -    if model_check or grpo_check or online_check or checkpoint_check:
+-        if args.actor_num_gpus_per_node != 2:
+-            raise ValueError("--fsdp-model-check requires exactly two training devices")
 +    if model_check or grpo_check or online_check or checkpoint_check or sync_train:
-         if args.actor_num_gpus_per_node != 2:
-             raise ValueError("--fsdp-model-check requires exactly two training devices")
          if not args.hf_checkpoint or not (Path(args.hf_checkpoint) / "config.json").is_file():
-@@ -40,16 +41,18 @@ def validate_fsdp_args(args):
+             raise ValueError("--fsdp-model-check requires a local --hf-checkpoint containing config.json")
++    if model_check or grpo_check or online_check or checkpoint_check:
++        # Only the fixed acceptance fixtures pin two training devices; the
++        # production synchronous path sizes FSDP sharding from the runtime
++        # world size (fully_shard_parallel_size == world size).
++        if args.actor_num_gpus_per_node != 2:
++            raise ValueError("FSDP acceptance checks require exactly two training devices")
+     executable = Path(args.fsdp_python_executable)
+     if not executable.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK):
+         raise ValueError("--fsdp-python-executable must name an absolute, executable Python path")
+@@ -40,16 +45,18 @@ def validate_fsdp_args(args):
          "debug_rollout_only", "load", "save", "save_hf", "custom_config_path", "load_debug_rollout_data",
      ):
          if getattr(args, name, None):
@@ -101,7 +111,7 @@ index b5878992..06c6beb9 100644
          if not checkpoint_check:
              raise ValueError("Trainer checkpoint save/load currently requires --fsdp-checkpoint-check")
          if not checkpoint_save:
-@@ -62,24 +65,41 @@ def validate_fsdp_args(args):
+@@ -62,24 +69,42 @@ def validate_fsdp_args(args):
              raise ValueError("Checkpoint fixture recomputes actor logprobs")
          if (args.rollout_batch_size, args.n_samples_per_prompt, args.global_batch_size, args.micro_batch_size) != (2, 4, 4, 2):
              raise ValueError("Checkpoint fixture requires batch sizes 2/4/4/2")
@@ -111,8 +121,8 @@ index b5878992..06c6beb9 100644
              raise ValueError("FSDP online check requires disk weight transport and --update-weight-disk-dir")
          if not args.update_weight_disk_keep_files or args.flush_cache_interval != 1:
              raise ValueError("FSDP online check requires retained snapshots and flush-cache-interval=1")
-         if args.rollout_num_gpus != 2 or args.rollout_num_gpus_per_engine != 2 or args.num_gpus_per_node != 4:
-             raise ValueError("FSDP online check requires two training and two serving devices (one TP2 engine)")
+-        if args.rollout_num_gpus != 2 or args.rollout_num_gpus_per_engine != 2 or args.num_gpus_per_node != 4:
+-            raise ValueError("FSDP online check requires two training and two serving devices (one TP2 engine)")
 -        if args.num_rollout != 2 or not args.prompt_data or args.debug_train_only:
 +        if (not sync_train and args.num_rollout != 2) or not args.prompt_data or args.debug_train_only:
              raise ValueError("FSDP online check requires num-rollout=2, prompt-data and live serving")
@@ -126,7 +136,11 @@ index b5878992..06c6beb9 100644
          if args.rollout_function_path != "slime.rollout.sglang_rollout.generate_rollout":
              raise ValueError("FSDP online check requires synchronous SGLang rollout")
          if args.rollout_top_k != -1 or args.sglang_dp_size != 1 or args.sglang_pp_size != 1:
-             raise ValueError("FSDP online check requires untruncated sampling and a single TP2 engine")
+-            raise ValueError("FSDP online check requires untruncated sampling and a single TP2 engine")
++            raise ValueError("FSDP online check requires untruncated sampling and a single TP engine")
++    if online_check:
++        if args.rollout_num_gpus != 2 or args.rollout_num_gpus_per_engine != 2 or args.num_gpus_per_node != 4:
++            raise ValueError("FSDP online check requires two training and two serving devices (one TP2 engine)")
 +    if sync_train:
 +        if not args.save or not args.save_interval or args.save_interval < 1 or not args.num_rollout or args.num_rollout < 1:
 +            raise ValueError("FSDP synchronous training requires --save, positive --save-interval and --num-rollout")
@@ -145,7 +159,7 @@ index b5878992..06c6beb9 100644
  
  
  def validate_grpo_args(args):
-@@ -125,6 +145,7 @@ def parse_fsdp_args(extra_args_provider):
+@@ -125,6 +150,7 @@ def parse_fsdp_args(extra_args_provider):
      parser = extra_args_provider(argparse.ArgumentParser(allow_abbrev=False))
      parser.add_argument("--train-backend", choices=["fsdp"], default="fsdp")
      parser.add_argument("--fsdp-provider", choices=["fsdpturbo"], default="fsdpturbo")
@@ -153,7 +167,7 @@ index b5878992..06c6beb9 100644
      parser.add_argument("--fsdp-python-executable", required=True)
      mode = parser.add_mutually_exclusive_group()
      mode.add_argument("--fsdp-init-only", action="store_true")
-@@ -136,6 +157,8 @@ def parse_fsdp_args(extra_args_provider):
+@@ -136,6 +162,8 @@ def parse_fsdp_args(extra_args_provider):
                        help="Validate two real SGLang rollouts, GRPO updates and full disk weight synchronization")
      mode.add_argument("--fsdp-checkpoint-check", action="store_true",
                        help="Validate trainer save/restore and exact continuation using a fixed GRPO batch")
@@ -162,7 +176,7 @@ index b5878992..06c6beb9 100644
      parser.add_argument("--fsdp-checkpoint-save", type=Path,
                          help="Training checkpoint root, separate from HF inference snapshots")
      parser.add_argument("--fsdp-checkpoint-load", type=Path,
-@@ -151,18 +174,26 @@ def parse_fsdp_args(extra_args_provider):
+@@ -151,18 +179,26 @@ def parse_fsdp_args(extra_args_provider):
      parser.set_defaults(num_rollout=0, rollout_batch_size=2, n_samples_per_prompt=4,
                          global_batch_size=8, advantage_estimator="grpo", kl_loss_coef=0.0,
                          fp16=False, bf16=True)

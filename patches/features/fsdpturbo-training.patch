@@ -1,6 +1,6 @@
-From dda44838dbf8be92a039d78ad7ee133df038702e Mon Sep 17 00:00:00 2001
-From: WBiXin <wangbingxuan@huawei.com>
-Date: Sat, 21 Nov 2026 20:51:51 +0800
+From efac1394638c88d4f64f56cebb86971beafff09b Mon Sep 17 00:00:00 2001
+From: weixin_51503402 <wangbingxuan@huawei.com>
+Date: Fri, 27 Nov 2026 23:15:09 +0800
 Subject: [PATCH 2/3] feat(fsdpturbo): add fixed-rollout GRPO training, online
  weight publication and sharded checkpoint
 
