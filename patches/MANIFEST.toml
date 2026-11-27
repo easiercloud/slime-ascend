@@ -134,6 +134,16 @@ base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
 sha256 = "1bb3c578ac4d665fe77ff0e70c89bdea520d29702106dc7e9398c66694ffc374"
 
 [[patches]]
+id = "slime:features:fsdpturbo-decouple-acceptance"
+category = "features"
+target = "slime"
+file = "0007-fsdpturbo-decouple-acceptance.patch"
+summary = "Decouple acceptance-only check helpers from the production synchronous-training path"
+issue = "local:fsdpturbo-decouple-acceptance"
+base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
+sha256 = "d786a70801a5c3ad8712a069edc1a8f27abf1d0cab2b32815ec9aff6810e8828"
+
+[[patches]]
 id = "mbridge:npu-device"
 category = "third_party"
 target = "mbridge"
