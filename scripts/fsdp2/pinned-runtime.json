@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "scope": "Slime A2 pinned dense Qwen FSDP2 runtime; offline GRPO integration",
+  "base_image": "quay.io/ascend/cann:9.1.0-910b-ubuntu22.04-py3.12",
+  "base_image_digest": "sha256:cfa76a9bcd84dd81c487d6d26edb8b95e2140525891009ccb6009e5cd2544d8e",
+  "python_series": "3.12",
+  "cann": "9.1.0",
+  "packages": {
+    "torch": "2.10.0",
+    "torch-npu": "2.10.0.post6",
+    "torchvision": "0.25.0",
+    "transformers": "5.12.1"
+  },
+  "turbo": {
+    "base_commit": "262f5ba4ae266d62b01c7e8a2e2bc46d46d1a0c3",
+    "reference_commit": "20409188e34fd44a5bd1d2908d00333525f4fb54",
+    "patch": "patches/third_party/fsdp-turbo/0001-backport-torch-accelerator-npu-delegation.patch",
+    "patch_sha256": "f3be7c40b138e09ebedb09d12ee06e4a21046860da44080297bec461b50cef31",
+    "device_sha256": "31a15a15e01a0cbbff7b18acc2a32b16f0d3ddf49195871f274d069c908b7ba3"
+  },
+  "note": "Core training pins are from Dockerfile.a2.ubuntu22.04.cann910.latest. This is not a rebuild or validation of its Megatron/SGLang inference stack. No legacy Docker helper is used."
+}

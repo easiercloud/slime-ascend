@@ -1,0 +1,1369 @@
+From bf0da5ad7115e7301712861a85198c1c933db534 Mon Sep 17 00:00:00 2001
+From: yiweiyun <1223702268@qq.com>
+Date: Sat, 28 Nov 2026 11:45:53 +0800
+Subject: [PATCH] Adapt FSDPTurbo model providers and shared policy training
+
+---
+ slime/backends/fsdp_utils/actor.py            |  38 +--
+ slime/backends/fsdp_utils/arguments.py        |  71 ++++-
+ slime/backends/fsdp_utils/checkpoint.py       |  14 +-
+ slime/backends/fsdp_utils/grpo_check.py       |   4 +-
+ .../backends/fsdp_utils/{grpo.py => loss.py}  |  49 +++-
+ slime/backends/fsdp_utils/model.py            | 258 +++++++++++++-----
+ slime/backends/fsdp_utils/model_check.py      |  35 ++-
+ slime/backends/fsdp_utils/preflight.py        |   2 +-
+ slime/backends/fsdp_utils/trainer.py          |  72 ++---
+ slime/backends/fsdp_utils/weight_sync.py      |  20 +-
+ tests/test_fsdp_entry.py                      |  56 ++++
+ tests/test_fsdp_grpo.py                       | 103 ++++++-
+ tests/test_fsdp_model.py                      |  41 ++-
+ tests/test_fsdp_weight_sync.py                |  32 ++-
+ train.py                                      |   2 +-
+ 15 files changed, 598 insertions(+), 199 deletions(-)
+ rename slime/backends/fsdp_utils/{grpo.py => loss.py} (78%)
+
+diff --git a/slime/backends/fsdp_utils/actor.py b/slime/backends/fsdp_utils/actor.py
+index 83f81a05..aa446db6 100644
+--- a/slime/backends/fsdp_utils/actor.py
++++ b/slime/backends/fsdp_utils/actor.py
+@@ -32,7 +32,7 @@ class FSDPTrainRayActor(TrainRayActor):
+ 
+         self.provider = FSDPTurbo.__name__
+         self.provider_config = FSDPTurboConfig.__name__
+-        self.grpo_trainer = None
++        self.trainer = None
+         self.grpo_observer = None
+         self.weight_version = getattr(args, "update_weight_start_version", 0)
+         self.train_parallel_config = {
+@@ -41,10 +41,10 @@ class FSDPTrainRayActor(TrainRayActor):
+         }
+         if getattr(args, "fsdp_checkpoint_load", None):
+             from .checkpoint import load
+-            from .trainer import GRPOTrainer
++            from .trainer import FSDPTrainer
+ 
+-            self.grpo_trainer = GRPOTrainer(args)
+-            metadata = load(self.grpo_trainer, args.fsdp_checkpoint_load)
++            self.trainer = FSDPTrainer(args)
++            metadata = load(self.trainer, args.fsdp_checkpoint_load)
+             self.weight_version = max(self.weight_version, metadata["weight_version"])
+             return metadata["next_rollout_id"]
+         return args.start_rollout_id
+@@ -92,24 +92,24 @@ class FSDPTrainRayActor(TrainRayActor):
+ 
+     def shutdown(self):
+         """Destroy this actor's process groups before Ray releases its resources."""
+-        self.grpo_trainer = self.grpo_observer = None
++        self.trainer = self.grpo_observer = None
+         if dist.is_initialized():
+             dist.destroy_process_group()
+         set_gloo_group(None)
+         return {"rank": self._rank, "distributed_initialized": dist.is_initialized()}
+ 
+     def train(self, rollout_id, rollout_data_ref, external_data=None):
+-        from slime.backends.fsdp_utils.trainer import GRPOTrainer
++        from slime.backends.fsdp_utils.trainer import FSDPTrainer
+         from slime.utils.data import process_rollout_data
+ 
+         if not (self.args.fsdp_grpo_check or self.args.fsdp_online_check or getattr(self.args, "fsdp_checkpoint_check", False) or getattr(self.args, "fsdp_sync_train", False)) or external_data is not None:
+-            raise ValueError("FSDP train currently supports the fixed GRPO check without external data")
++            raise ValueError("FSDP training requires a supported training mode without critic or teacher data")
+         data = process_rollout_data(rollout_data_ref, self._rank, self._world_size)
+-        if self.grpo_trainer is None:
+-            self.grpo_trainer = GRPOTrainer(self.args)
+-        result = self.grpo_trainer.train_batch(rollout_id, data, self.grpo_observer)
++        if self.trainer is None:
++            self.trainer = FSDPTrainer(self.args)
++        result = self.trainer.train_batch(rollout_id, data, self.grpo_observer)
+         if self.grpo_observer is not None:
+-            result["validation"] = self.grpo_observer.report(self.grpo_trainer)
++            result["validation"] = self.grpo_observer.report(self.trainer)
+             self.grpo_observer = None
+         return result
+ 
+@@ -124,32 +124,32 @@ class FSDPTrainRayActor(TrainRayActor):
+     def save_model(self, rollout_id, force_sync=False):
+         from .checkpoint import save
+ 
+-        if not getattr(self.args, "fsdp_checkpoint_save", None) or self.grpo_trainer is None:
++        if not getattr(self.args, "fsdp_checkpoint_save", None) or self.trainer is None:
+             raise ValueError("FSDP save requires --fsdp-checkpoint-save and an initialized trainer")
+         # Writes are always synchronous; force_sync needs no separate behavior.
+-        return save(self.grpo_trainer, self.args.fsdp_checkpoint_save, rollout_id, self.weight_version)
++        return save(self.trainer, self.args.fsdp_checkpoint_save, rollout_id, self.weight_version)
+ 
+     def checkpoint_probe(self):
+         from .checkpoint_check import state_probe
+ 
+         if not getattr(self.args, "fsdp_checkpoint_check", False):
+             raise ValueError("State probe requires --fsdp-checkpoint-check")
+-        return state_probe(self.grpo_trainer, self.weight_version)
++        return state_probe(self.trainer, self.weight_version)
+ 
+     def update_weights(self):
+-        from slime.backends.fsdp_utils.trainer import GRPOTrainer
++        from slime.backends.fsdp_utils.trainer import FSDPTrainer
+         from slime.backends.fsdp_utils.weight_sync import export_weights
+ 
+         if not (self.args.fsdp_online_check or getattr(self.args, "fsdp_sync_train", False)):
+             raise ValueError("Weight publication requires --fsdp-online-check")
+-        if self.grpo_trainer is None:
+-            self.grpo_trainer = GRPOTrainer(self.args)
+-        report = export_weights(self.grpo_trainer, self.weight_version + 1)
++        if self.trainer is None:
++            self.trainer = FSDPTrainer(self.args)
++        report = export_weights(self.trainer, self.weight_version + 1)
+         self.weight_version += 1
+         return report
+ 
+     def training_progress(self):
+-        trainer = self.grpo_trainer
++        trainer = self.trainer
+         return {"rank": self._rank, "pid": os.getpid(), "weight_version": self.weight_version,
+                 "optimizer_steps": trainer.optimizer_steps if trainer else 0,
+                 "last_rollout_id": trainer.last_rollout_id if trainer else None}
+diff --git a/slime/backends/fsdp_utils/arguments.py b/slime/backends/fsdp_utils/arguments.py
+index e72681d5..1fecc65d 100644
+--- a/slime/backends/fsdp_utils/arguments.py
++++ b/slime/backends/fsdp_utils/arguments.py
+@@ -16,10 +16,14 @@ def validate_fsdp_args(args):
+     sync_train = getattr(args, "fsdp_sync_train", False)
+     if not args.fsdp_init_only and not model_check and not grpo_check and not online_check and not checkpoint_check and not sync_train:
+         raise ValueError("Unrestricted FSDP training is not implemented; choose a check mode or --fsdp-sync-train")
+-    if args.fsdp_init_report is None:
++    if not sync_train and args.fsdp_init_report is None:
+         raise ValueError("FSDP checks require --fsdp-init-report")
+     if model_check or grpo_check or online_check or checkpoint_check or sync_train:
+-        if not args.hf_checkpoint or not (Path(args.hf_checkpoint) / "config.json").is_file():
++        if getattr(args, "fsdp_random_init", False):
++            config = getattr(args, "fsdp_model_config", None)
++            if not config or not Path(config).is_file():
++                raise ValueError("Random initialization requires --fsdp-model-config")
++        elif not args.hf_checkpoint or not (Path(args.hf_checkpoint) / "config.json").is_file():
+             raise ValueError("--fsdp-model-check requires a local --hf-checkpoint containing config.json")
+     if model_check or grpo_check or online_check or checkpoint_check:
+         # Only the fixed acceptance fixtures pin two training devices; the
+@@ -36,8 +40,8 @@ def validate_fsdp_args(args):
+         raise ValueError("--num-gpus-per-node must cover the training devices")
+     if args.distributed_timeout_minutes <= 0:
+         raise ValueError("--distributed-timeout-minutes must be positive")
+-    if args.advantage_estimator != "grpo":
+-        raise ValueError("FSDP currently supports only --advantage-estimator grpo")
++    if (grpo_check or checkpoint_check) and args.advantage_estimator != "grpo":
++        raise ValueError("The fixed GRPO and checkpoint fixtures require --advantage-estimator grpo")
+     for name in (
+         "colocate", "offload", "offload_train", "offload_rollout", "release_train",
+         "use_opd", "use_kl_loss", "kl_coef", "kl_loss_coef", "ref_load", "megatron_config_path",
+@@ -53,7 +57,7 @@ def validate_fsdp_args(args):
+     if args.update_weight_mode != "full":
+         raise ValueError("FSDP currently supports only full weight updates")
+     if grpo_check or online_check or checkpoint_check or sync_train:
+-        validate_grpo_args(args)
++        validate_policy_args(args)
+     checkpoint_save = getattr(args, "fsdp_checkpoint_save", None)
+     checkpoint_load = getattr(args, "fsdp_checkpoint_load", None)
+     if (checkpoint_save or checkpoint_load or checkpoint_check) and not sync_train:
+@@ -86,7 +90,11 @@ def validate_fsdp_args(args):
+         if args.rollout_function_path != "slime.rollout.sglang_rollout.generate_rollout":
+             raise ValueError("FSDP online check requires synchronous SGLang rollout")
+         if args.rollout_top_k != -1 or args.sglang_dp_size != 1 or args.sglang_pp_size != 1:
+-            raise ValueError("FSDP online check requires untruncated sampling and a single TP engine")
++            raise ValueError("FSDP online training requires untruncated sampling and TP-only serving")
++        serving = args.rollout_num_gpus
++        per_engine = args.rollout_num_gpus_per_engine
++        if not serving or per_engine < 1 or serving % per_engine:
++            raise ValueError("FSDP serving requires a positive number of devices divisible by --rollout-num-gpus-per-engine")
+     if online_check:
+         if args.rollout_num_gpus != 2 or args.rollout_num_gpus_per_engine != 2 or args.num_gpus_per_node != 4:
+             raise ValueError("FSDP online check requires two training and two serving devices (one TP2 engine)")
+@@ -107,7 +115,9 @@ def validate_fsdp_args(args):
+                 raise ValueError(f"{name} is not supported by FSDP synchronous resume")
+ 
+ 
+-def validate_grpo_args(args):
++def validate_policy_args(args):
++    from slime.utils.ppo_utils import get_pg_loss_type
++
+     for name in (
+         "entropy_coef", "normalize_advantages", "calculate_per_token_loss", "use_tis",
+         "use_opsm", "get_mismatch_metrics", "use_score_centering", "use_dynamic_batch_size",
+@@ -117,9 +127,11 @@ def validate_grpo_args(args):
+         "custom_reward_post_process_path", "custom_convert_samples_to_train_data_path",
+     ):
+         if getattr(args, name, None):
+-            raise ValueError(f"--{name.replace('_', '-')} is not supported by the FSDP GRPO stage")
+-    if args.loss_type != "policy_loss" or getattr(args, "pg_loss_type", None) not in (None, "ppo"):
+-        raise ValueError("FSDP GRPO requires the PPO-clipped policy_loss objective")
++            raise ValueError(f"--{name.replace('_', '-')} is not supported by the FSDP policy trainer")
++    estimator = args.advantage_estimator
++    expected = {"grpo": "ppo", "gspo": "ppo", "cispo": "cispo"}
++    if estimator not in expected or args.loss_type != "policy_loss" or get_pg_loss_type(args) != expected[estimator]:
++        raise ValueError("FSDP policy_loss supports GRPO, GSPO and CISPO with their Slime policy objectives")
+     if not args.compute_advantages_and_returns or not args.rewards_normalization:
+         raise ValueError("FSDP GRPO requires BatchBuilder reward normalization and advantage computation")
+     if args.rollout_top_p != 1.0:
+@@ -132,7 +144,7 @@ def validate_grpo_args(args):
+         value = getattr(args, name)
+         if not math.isfinite(value) or value < 0:
+             raise ValueError(f"{name} must be finite and nonnegative")
+-    if args.eps_clip > 1:
++    if estimator != "cispo" and args.eps_clip > 1:
+         raise ValueError("eps_clip must not exceed 1")
+     if args.eps_clip_high is not None and (not math.isfinite(args.eps_clip_high) or args.eps_clip_high < 0):
+         raise ValueError("eps_clip_high must be finite and nonnegative")
+@@ -151,11 +163,17 @@ def parse_fsdp_args(extra_args_provider):
+     parser.add_argument("--train-backend", choices=["fsdp"], default="fsdp")
+     parser.add_argument("--fsdp-provider", choices=["fsdpturbo"], default="fsdpturbo")
+     parser.add_argument("--ckpt-step", type=int, help="Explicit saved rollout ID for synchronous resume")
+-    parser.add_argument("--fsdp-python-executable", required=True)
++    parser.add_argument("--fsdp-python-executable", default=sys.executable)
++    parser.add_argument("--fsdp-random-init", action="store_true",
++                        help="Create initial parameters from --fsdp-model-config instead of loading HF weights")
++    parser.add_argument("--fsdp-model-config", type=Path,
++                        help="Local HF model JSON or its directory for random initialization")
++    parser.add_argument("--fsdp-model-provider", help="Import path of a custom FSDP model provider")
++    parser.add_argument("--fsdp-wrap-modules", nargs="+", help="FSDPTurbo module paths to shard separately")
+     mode = parser.add_mutually_exclusive_group()
+     mode.add_argument("--fsdp-init-only", action="store_true")
+     mode.add_argument("--fsdp-model-check", action="store_true",
+-                      help="Validate Qwen3 loading, sharding, backward and a fixed AdamW step; no GRPO")
++                      help="Validate causal LM initialization, sharding, backward and a fixed AdamW step")
+     mode.add_argument("--fsdp-grpo-check", action="store_true",
+                       help="Validate two GRPO updates through BatchBuilder and actor.train on a fixed fixture")
+     mode.add_argument("--fsdp-online-check", action="store_true",
+@@ -163,7 +181,7 @@ def parse_fsdp_args(extra_args_provider):
+     mode.add_argument("--fsdp-checkpoint-check", action="store_true",
+                       help="Validate trainer save/restore and exact continuation using a fixed GRPO batch")
+     mode.add_argument("--fsdp-sync-train", action="store_true",
+-                      help="Run Slime synchronous GRPO with joint trainer/data checkpoints and cold restart")
++                      help="Run Slime synchronous policy training with joint trainer/data checkpoints")
+     parser.add_argument("--fsdp-checkpoint-save", type=Path,
+                         help="Training checkpoint root, separate from HF inference snapshots")
+     parser.add_argument("--fsdp-checkpoint-load", type=Path,
+@@ -184,6 +202,13 @@ def parse_fsdp_args(extra_args_provider):
+ 
+         parser = add_sglang_arguments(parser)
+     args = parser.parse_args()
++    if args.fsdp_model_provider and args.custom_model_provider_path and args.fsdp_model_provider != args.custom_model_provider_path:
++        raise ValueError("Select one FSDP model provider")
++    args.fsdp_model_provider = args.fsdp_model_provider or args.custom_model_provider_path
++    if args.fsdp_random_init:
++        configure_random_source(args)
++    elif args.fsdp_model_config is not None:
++        raise ValueError("--fsdp-model-config is used with --fsdp-random-init")
+     if args.fsdp_sync_train and (args.fsdp_checkpoint_save or args.fsdp_checkpoint_load):
+         raise ValueError("Use --save/--load checkpoint roots with --fsdp-sync-train")
+     requested_start = args.start_rollout_id
+@@ -202,3 +227,21 @@ def parse_fsdp_args(extra_args_provider):
+         args.start_rollout_id = requested_start
+         resolve(args)
+     return args, restore_plan
++
++
++def configure_random_source(args):
++    if args.fsdp_model_config is None:
++        raise ValueError("--fsdp-random-init requires --fsdp-model-config")
++    config = args.fsdp_model_config.expanduser().resolve()
++    if config.is_dir():
++        config /= "config.json"
++    if not config.is_file():
++        raise ValueError(f"Missing HF model configuration: {config}")
++    args.fsdp_model_config = config
++    if args.fsdp_online_check or args.fsdp_sync_train:
++        # Slime creates SGLang engines before the trainer's initial publication.
++        # Dummy initialization needs only matching config/tokenizer assets.
++        if config.name != "config.json" or (args.hf_checkpoint and Path(args.hf_checkpoint).resolve() != config.parent):
++            raise ValueError("Online random initialization needs config.json in the local HF tokenizer asset directory")
++        args.hf_checkpoint = str(config.parent)
++        args.sglang_load_format = "dummy"
+diff --git a/slime/backends/fsdp_utils/checkpoint.py b/slime/backends/fsdp_utils/checkpoint.py
+index 08857af6..12fd32b0 100644
+--- a/slime/backends/fsdp_utils/checkpoint.py
++++ b/slime/backends/fsdp_utils/checkpoint.py
+@@ -13,11 +13,11 @@ import torch
+ import torch.distributed as dist
+ import torch.distributed.checkpoint as dcp
+ from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_dict
+-from torch.distributed.fsdp import FSDPModule
+ 
+ from slime.utils import accelerator
+ from slime.utils.distributed_utils import get_gloo_group
+ 
++from .model import reshard_model
+ 
+ FORMAT = "slime-fsdpturbo-training-v1"
+ POLICY_FIELDS = ("lr", "fsdp_adam_beta1", "fsdp_adam_beta2", "fsdp_adam_eps",
+@@ -71,6 +71,14 @@ def signature(trainer):
+             "model_config": config, "policy": {key: getattr(trainer.args, key) for key in POLICY_FIELDS},
+             "scheduler": "constant", "master_dtype": "float32", "compute_dtype": "bfloat16",
+             "runtime": {name: importlib.metadata.version(name) for name in ("torch", "torch-npu", "transformers")}}
++    # Keep the previous default GRPO signature readable. Other objectives or
++    # explicit wrapping layouts change the restart contract.
++    if getattr(trainer.args, "advantage_estimator", "grpo") != "grpo":
++        value["policy"]["advantage_estimator"] = trainer.args.advantage_estimator
++    if getattr(trainer.args, "fsdp_wrap_modules", None):
++        value["parallelism"]["wrap_modules"] = trainer.args.fsdp_wrap_modules
++    if getattr(trainer.args, "fsdp_model_provider", None):
++        value["model_provider"] = trainer.args.fsdp_model_provider
+     # HF configs can contain integer dictionary keys (id2label) and tuples.
+     # Compare the same JSON representation before and after persistence.
+     return json.loads(json.dumps(value, sort_keys=True))
+@@ -121,9 +129,7 @@ class TrainingState:
+ 
+ 
+ def reshard(trainer):
+-    for module in trainer.model.modules():
+-        if isinstance(module, FSDPModule):
+-            module.reshard()
++    reshard_model(trainer.model)
+ 
+ 
+ def save(trainer, directory, rollout_id, weight_version):
+diff --git a/slime/backends/fsdp_utils/grpo_check.py b/slime/backends/fsdp_utils/grpo_check.py
+index 6e3d1fab..612dc74c 100644
+--- a/slime/backends/fsdp_utils/grpo_check.py
++++ b/slime/backends/fsdp_utils/grpo_check.py
+@@ -43,8 +43,8 @@ class GRPOOracle:
+         self.rank, self.world = dist.get_rank(), dist.get_world_size()
+         self.device = torch.device(accelerator.device_type(), accelerator.current_device())
+         print(f"[grpo-check rank={self.rank}] independent unsharded reference", flush=True)
+-        self.reference = load_model(args.hf_checkpoint, torch.bfloat16).to(self.device)
+-        self.master = load_model(args.hf_checkpoint, torch.float32).to(self.device)
++        self.reference = load_model(args, torch.bfloat16).to(self.device)
++        self.master = load_model(args, torch.float32).to(self.device)
+         self.optimizer = torch.optim.AdamW(self.master.parameters(), lr=args.lr,
+                                           betas=(args.fsdp_adam_beta1, args.fsdp_adam_beta2),
+                                           eps=args.fsdp_adam_eps, weight_decay=args.fsdp_weight_decay, foreach=False)
+diff --git a/slime/backends/fsdp_utils/grpo.py b/slime/backends/fsdp_utils/loss.py
+similarity index 78%
+rename from slime/backends/fsdp_utils/grpo.py
+rename to slime/backends/fsdp_utils/loss.py
+index a78ede7f..f65b8e9c 100644
+--- a/slime/backends/fsdp_utils/grpo.py
++++ b/slime/backends/fsdp_utils/loss.py
+@@ -1,10 +1,18 @@
+-"""Dense, padded GRPO primitives independent of Megatron and FSDPTurbo imports."""
++"""Dense response policy loss for the FSDP backend."""
+ 
+ import math
+ 
+ import torch
+ import torch.nn.functional as F
+ 
++from slime.utils.ppo_utils import (
++    compute_cispo_loss,
++    compute_gspo_kl,
++    compute_policy_loss,
++    get_grpo_returns,
++    get_pg_loss_type,
++)
++
+ 
+ def validate_batch(data, vocab_size):
+     """Validate BatchBuilder's DP-local view before distributed model execution."""
+@@ -23,7 +31,7 @@ def validate_batch(data, vocab_size):
+     for key in ("multimodal_train_inputs", "teacher_log_probs", "rollout_routed_experts",
+                 "rollout_top_p_token_ids", "rollout_top_p_token_offsets"):
+         if key in data:
+-            raise ValueError(f"Unsupported GRPO payload: {key}")
++            raise ValueError(f"Unsupported FSDP policy payload: {key}")
+     for i in range(n):
+         tokens, mask = torch.as_tensor(data["tokens"][i]), torch.as_tensor(data["loss_masks"][i])
+         length, response = data["total_lengths"][i], data["response_lengths"][i]
+@@ -86,27 +94,40 @@ def response_log_probs(logits, input_ids, lengths, response_lengths, temperature
+     return result
+ 
+ 
+-def clipped_policy_loss(new, old, advantage, clip_low, clip_high, dual_clip=None):
+-    """Eager PPO clip objective, matching slime.utils.ppo_utils without torch.compile."""
+-    ratio = (new - old.detach()).exp()
++def clipped_policy_loss(new, old, advantage, clip_low, clip_high, dual_clip=None, *,
++                        sequence_mask=None, pg_loss_type="ppo"):
++    """Use Slime's token ratio or GSPO's masked ratio over the complete response."""
++    old = old.detach()
+     advantage = torch.as_tensor(advantage, dtype=new.dtype, device=new.device).detach()
+-    unclipped = -ratio * advantage
+-    clipped = -ratio.clamp(1 - clip_low, 1 + clip_high) * advantage
+-    loss = torch.maximum(unclipped, clipped)
+-    if dual_clip is not None:
+-        loss = torch.where(advantage < 0, torch.minimum(loss, -dual_clip * advantage), loss)
+-    return loss, (clipped > unclipped).float(), old.detach() - new
++    if sequence_mask is None:
++        log_ratio = old - new
++    else:
++        log_ratio = compute_gspo_kl([new], [old], [new], [sequence_mask])
++    if pg_loss_type == "ppo":
++        loss, clipped = compute_policy_loss(log_ratio, advantage, clip_low, clip_high, dual_clip)
++    elif pg_loss_type == "cispo":
++        loss, clipped = compute_cispo_loss(log_ratio, new, advantage, clip_low, clip_high)
++    else:
++        raise ValueError(f"Unsupported FSDP policy loss type: {pg_loss_type}")
++    return loss, clipped, log_ratio
+ 
+ 
+ def microbatch_loss(args, data, indices, new_log_probs, old_log_probs):
+     """Sum each segment's share of its rollout mean; caller scales for DP/step."""
+     loss = sum(log_probs.sum() * 0 for log_probs in new_log_probs)
+     metrics = loss.detach().new_zeros(3)
+-    for i, new in zip(indices, new_log_probs, strict=True):
++    pg_loss_type = get_pg_loss_type(args)
++    sequence_ratio = args.advantage_estimator == "gspo"
++    # BatchBuilder has normalized each reward over the complete prompt group.
++    rewards = loss.new_tensor([data["rewards"][i] for i in indices])
++    advantages = get_grpo_returns(rewards, new_log_probs)
++    for i, new, advantage in zip(indices, new_log_probs, advantages, strict=True):
+         old = old_log_probs[i].to(device=new.device, dtype=torch.float32)
+-        values, clipped, kl = clipped_policy_loss(new, old, data["rewards"][i], args.eps_clip,
+-                                                 args.eps_clip_high, args.eps_clip_c)
+         mask = torch.as_tensor(data["loss_masks"][i], device=new.device, dtype=torch.float32)
++        values, clipped, kl = clipped_policy_loss(
++            new, old, advantage, args.eps_clip, args.eps_clip_high, args.eps_clip_c,
++            sequence_mask=mask if sequence_ratio else None, pg_loss_type=pg_loss_type,
++        )
+         denominator = max(float(data["rollout_mask_sums"][i]), 1.0)
+         term = (values * mask).sum() / denominator
+         loss = loss + term
+diff --git a/slime/backends/fsdp_utils/model.py b/slime/backends/fsdp_utils/model.py
+index 0c901c23..5ef9200a 100644
+--- a/slime/backends/fsdp_utils/model.py
++++ b/slime/backends/fsdp_utils/model.py
+@@ -1,78 +1,210 @@
+-"""Model loading and native FSDP2 through FSDPTurbo.
+-
+-Provider and Transformers imports stay lazy to preserve the serving interpreter.
+-This module owns no rollout, checkpoint export or GRPO policy. Architecture
+-differences are dispatched on ``config.model_type`` via the small ``MODEL_SPECS``
+-registry, mirroring the Megatron backend's ``hf_to_megatron`` loader table.
+-"""
++"""Local HF causal-LM construction and the native FSDP2 policy used by FSDPTurbo."""
+ 
++import json
++from os import PathLike
+ from pathlib import Path
+ 
+-# Per-architecture differences needed for the model milestone. The loader itself
+-# is architecture-agnostic (``AutoModelForCausalLM``); only the FSDP layer path
+-# and tied-embedding access vary. Models sharing a spec reuse the same entry.
+-_MODEL_SPECS = {
+-    "llama": {"layer_path": "model.layers.{*}", "tie": ("model.embed_tokens", "lm_head")},
+-    "qwen2": {"layer_path": "model.layers.{*}", "tie": ("model.embed_tokens", "lm_head")},
+-    "qwen3": {"layer_path": "model.layers.{*}", "tie": ("model.embed_tokens", "lm_head")},
+-}
+-
+ 
+-def _resolve_spec(config):
+-    try:
+-        return _MODEL_SPECS[config.model_type]
+-    except KeyError as exc:
+-        raise ValueError(f"Unsupported HuggingFace model type: {config.model_type}") from exc
++def _local_config_path(source, *, allow_named_json=False):
++    path = Path(source) if source else None
++    if path is not None and path.is_dir():
++        path = path / "config.json"
++    if path is None or not path.is_file():
++        raise ValueError("Expected a local Hugging Face model source containing config.json")
++    if path.name != "config.json" and not (allow_named_json and path.suffix == ".json"):
++        raise ValueError("Expected a local Hugging Face model source containing config.json")
++    return path
+ 
+ 
+ def tied_embeddings(model):
+-    """True when the decoder's input and output embeddings share storage."""
+-    embed_path, head_path = _resolve_spec(model.config)["tie"]
+-    embed = model
+-    for part in embed_path.split("."):
+-        embed = getattr(embed, part)
+-    head = model
+-    for part in head_path.split("."):
+-        head = getattr(head, part)
+-    return embed.weight is head.weight
+-
+-
+-def load_model(checkpoint, dtype):
+-    from transformers import AutoConfig, AutoModelForCausalLM
++    """Return whether the HF input and output embeddings share one parameter."""
++    embeddings = model.get_input_embeddings()
++    head = model.get_output_embeddings()
++    return embeddings is not None and head is not None and embeddings.weight is head.weight
+ 
+-    checkpoint = Path(checkpoint)
+-    if not (checkpoint / "config.json").is_file():
+-        raise ValueError("Expected a local Hugging Face checkpoint with config.json")
+-    config = AutoConfig.from_pretrained(checkpoint, local_files_only=True, trust_remote_code=False)
+-    _resolve_spec(config)
++
++def _validate_model(model, torch, dtype):
++    if not isinstance(model, torch.nn.Module) or not hasattr(model, "config"):
++        raise TypeError("The FSDP model provider must return an HF-compatible causal-LM module")
++    config = model.config
++    if getattr(config, "is_encoder_decoder", False):
++        raise ValueError("FSDP training requires a decoder-only causal LM")
++    if not isinstance(getattr(config, "vocab_size", None), int) or config.vocab_size <= 0:
++        raise ValueError("The FSDP model must declare a positive vocabulary size")
++    parameters = list(model.parameters())
++    if not parameters or any(t.is_meta for t in (*parameters, *model.buffers())):
++        raise ValueError("FSDP model construction must materialize every parameter and buffer")
++    if dtype == torch.float32 and any(t.dtype != dtype for t in parameters):
++        raise ValueError("FSDP training requires FP32 master parameters")
++    if getattr(config, "tie_word_embeddings", False) and not tied_embeddings(model):
++        raise ValueError("FSDP model construction did not preserve tied word embeddings")
+     config.use_cache = False
+-    model, info = AutoModelForCausalLM.from_pretrained(
+-        checkpoint, config=config, dtype=dtype, attn_implementation="eager",
+-        local_files_only=True, trust_remote_code=False, output_loading_info=True,
+-    )
+-    for key in ("missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs"):
+-        if info.get(key):
+-            raise ValueError(f"Incomplete checkpoint loading: {key}={info[key]}")
+-    if any(t.is_meta for t in (*model.parameters(), *model.buffers())):
+-        raise ValueError("Checkpoint loading left meta tensors")
+-    if config.tie_word_embeddings and not tied_embeddings(model):
+-        raise ValueError("Checkpoint loading did not preserve tied embeddings")
+     return model.train()
+ 
+ 
+-def wrap_model(model, world_size):
++def load_model(args, dtype=None):
++    """Construct a local pretrained or explicitly random-initialized causal LM.
++
++    An optional provider function receives `config, *, checkpoint, dtype, seed`.
++    Its checkpoint is a local directory for pretrained initialization and None
++    for random initialization. The provider returns an unwrapped HF-compatible
++    module. The legacy path-plus-dtype form remains valid for model fixtures.
++    """
++    import torch
++    from transformers import AutoConfig, AutoModelForCausalLM
++
++    dtype = torch.float32 if dtype is None else dtype
++    if isinstance(args, (str, PathLike)):
++        checkpoint_source = args
++        random_init, provider_path, seed = False, None, None
++    else:
++        checkpoint_source = getattr(args, "hf_checkpoint", None)
++        random_init = getattr(args, "fsdp_random_init", False)
++        provider_path = getattr(args, "fsdp_model_provider", None)
++        seed = getattr(args, "seed", None)
++    source = getattr(args, "fsdp_model_config", None) if random_init else checkpoint_source
++    config_path = _local_config_path(source, allow_named_json=random_init)
++    checkpoint = None if random_init else config_path.parent
++    provider = None
++    if provider_path:
++        from slime.utils.misc import load_function
++
++        provider = load_function(provider_path)
++    if config_path.name == "config.json":
++        config = AutoConfig.from_pretrained(config_path.parent, local_files_only=True, trust_remote_code=False)
++    else:
++        payload = json.loads(config_path.read_text(encoding="utf-8"))
++        if not isinstance(payload, dict) or not isinstance(payload.get("model_type"), str):
++            raise ValueError("A standalone FSDP model config JSON must declare model_type")
++        config = AutoConfig.for_model(payload.pop("model_type"), **payload)
++    if getattr(config, "is_encoder_decoder", False):
++        raise ValueError("FSDP training requires a decoder-only causal LM")
++    config.use_cache = False
++
++    if random_init:
++        if type(seed) is not int:
++            raise ValueError("Random FSDP model initialization requires an integer --seed")
++        # All ranks build the same CPU parameters without changing their
++        # subsequent training RNG streams.
++        with torch.random.fork_rng(devices=[]), torch.device("cpu"):
++            torch.random.default_generator.manual_seed(seed)
++            if provider:
++                model = provider(config, checkpoint=None, dtype=torch.float32, seed=seed)
++            else:
++                model = AutoModelForCausalLM.from_config(
++                    config, dtype=torch.float32, attn_implementation="eager", trust_remote_code=False
++                )
++        model = _validate_model(model, torch, torch.float32)
++        if dtype != torch.float32:
++            # Match FSDP's compute parameters in the unsharded oracle. Keep
++            # constructor-created buffers (including RoPE frequencies) intact.
++            with torch.no_grad():
++                for parameter in model.parameters():
++                    parameter.data = parameter.to(dtype=dtype)
++        return model
++    elif provider:
++        model = provider(config, checkpoint=checkpoint, dtype=dtype, seed=seed)
++    else:
++        model, info = AutoModelForCausalLM.from_pretrained(
++            checkpoint,
++            config=config,
++            dtype=dtype,
++            attn_implementation="eager",
++            local_files_only=True,
++            trust_remote_code=False,
++            output_loading_info=True,
++        )
++        for key in ("missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs"):
++            if info.get(key):
++                raise ValueError(f"Incomplete checkpoint loading: {key}={info[key]}")
++    return _validate_model(model, torch, dtype)
++
++
++def _owning_unit(name, units):
++    """Find the innermost selected FSDP module containing a named parameter."""
++    prefix = name.rpartition(".")[0]
++    while prefix and prefix not in units:
++        prefix = prefix.rpartition(".")[0]
++    return prefix
++
++
++def _wrap_units(model, patterns=None, *, match=None):
++    """Select concrete non-nested module paths for the FSDPTurbo plan."""
++    from torch.nn import Module
++
++    modules = {name: module for name, module in model.named_modules() if name}
++    units = set()
++    if patterns:
++        patterns = (patterns,) if isinstance(patterns, str) else patterns
++        for pattern in patterns:
++            matched = {name for name in modules if match(pattern, name)}
++            if not matched:
++                raise ValueError(f"--fsdp-wrap-modules pattern {pattern!r} did not match a submodule")
++            units.update(matched)
++    else:
++        class_names = set(getattr(model, "_no_split_modules", None) or ())
++        for name, module in modules.items():
++            if not _owning_unit(name, units) and any(cls.__name__ in class_names for cls in type(module).__mro__):
++                units.add(name)
++    if not units:
++        raise ValueError("The model declares no FSDP wrap units; supply --fsdp-wrap-modules with decoder layer paths")
++    for name in sorted(units):
++        if _owning_unit(name, units):
++            raise ValueError(f"Nested --fsdp-wrap-modules selections include {name!r}")
++        if type(modules[name]).forward is Module.forward:
++            raise ValueError(f"FSDP wrap unit {name!r} has no forward; select its callable layers")
++    # Torch-native FSDP2 keeps shared parameters within a single ownership
++    # group. The root owns untargeted embeddings and the LM head together.
++    seen = {}
++    for name, parameter in model.named_parameters(remove_duplicate=False):
++        first = seen.setdefault(id(parameter), name)
++        if first != name and _owning_unit(first, units) != _owning_unit(name, units):
++            raise ValueError(f"FSDP wrap units split a shared parameter between {first!r} and {name!r}")
++    return [name for name in modules if name in units]
++
++
++def wrap_model(model, world_size, args=None):
+     from fsdp_turbo.fsdp_turbo import FSDPTurbo
+     from fsdp_turbo.fsdp_turbo_config import DistributedConfig, FSDPPlanConfig, FSDPTurboConfig
++    from fsdp_turbo.utils.str_match import module_name_match
++
++    patterns = getattr(args, "fsdp_wrap_modules", None)
++    units = _wrap_units(model, patterns, match=module_name_match)
++    config = FSDPTurboConfig(
++        distributed=DistributedConfig(
++            data_parallel_size=1,
++            fully_shard_parallel_size=world_size,
++            tensor_parallel_size=1,
++            expert_parallel_size=1,
++            fsdp_plan=FSDPPlanConfig(
++                apply_modules={name: {} for name in units},
++                fsdp_implementation="native",
++                param_dtype="bf16",
++                reduce_dtype="fp32",
++                cpu_offload=False,
++                num_to_forward_prefetch=0,
++                num_to_backward_prefetch=0,
++            ),
++        )
++    )
++    wrapped = FSDPTurbo(config, model)
++    reshard_model(model)
++    return wrapped
++
++
++def reshard_model(model):
++    """Return to FP32 DTensor masters after any no-grad FSDP2 forward."""
++    import torch
++    from torch.distributed.fsdp import FSDPModule
++    from torch.distributed.tensor import DTensor
+ 
+-    layer_path = _resolve_spec(model.config)["layer_path"]
+-    # Decoder layers are separate units; tied embedding/head belong to root.
+-    config = FSDPTurboConfig(distributed=DistributedConfig(
+-        data_parallel_size=1, fully_shard_parallel_size=world_size,
+-        tensor_parallel_size=1, expert_parallel_size=1,
+-        fsdp_plan=FSDPPlanConfig(
+-            apply_modules={layer_path: {}}, fsdp_implementation="native",
+-            param_dtype="bf16", reduce_dtype="fp32", cpu_offload=False,
+-            num_to_forward_prefetch=0, num_to_backward_prefetch=0,
+-        ),
+-    ))
+-    return FSDPTurbo(config, model)
++    modules = [module for module in model.modules() if isinstance(module, FSDPModule)]
++    if not modules:
++        return
++    for module in reversed(modules):
++        module.reshard()
++    for name, parameter in model.named_parameters():
++        if not isinstance(parameter, DTensor) or parameter.dtype != torch.float32:
++            raise RuntimeError(f"FSDP parameter {name!r} did not return to its FP32 DTensor master")
++    if getattr(getattr(model, "config", None), "tie_word_embeddings", False) and not tied_embeddings(model):
++        raise RuntimeError("FSDP did not preserve tied word embeddings")
+diff --git a/slime/backends/fsdp_utils/model_check.py b/slime/backends/fsdp_utils/model_check.py
+index 0856f7c3..0a37a5d6 100644
+--- a/slime/backends/fsdp_utils/model_check.py
++++ b/slime/backends/fsdp_utils/model_check.py
+@@ -41,10 +41,10 @@ class Comparison:
+                 "reference_norm": math.sqrt(self.reference2), "actual_norm": math.sqrt(self.actual2)}
+ 
+ 
+-def fixed_batch(rank, device):
++def fixed_batch(rank, device, vocab_size):
+     # Reproducible in-vocabulary IDs, distinct samples and unequal valid lengths.
+     length = (23, 32)[rank]
+-    ids = ((torch.arange(32, device=device) * 37 + 100 + rank * 53) % 10000).unsqueeze(0)
++    ids = ((torch.arange(32, device=device) * 37 + 100 + rank * 53) % min(vocab_size, 10000)).unsqueeze(0)
+     mask = (torch.arange(32, device=device) < length).unsqueeze(0)
+     ids = ids.masked_fill(~mask, 0)
+     return ids, mask.long()
+@@ -80,14 +80,14 @@ def check_model(args):
+         raise ValueError("The fixed model oracle requires two ranks")
+     torch.manual_seed(1234)
+     device = torch.device(accelerator.device_type(), accelerator.current_device())
+-    ids, mask = fixed_batch(rank, device)
++    print(f"[model-check rank={rank}] loading unsharded reference", flush=True)
++    reference = load_model(args, torch.bfloat16).to(device)
++    # The fixture compares one deterministic operation in evaluation mode.
++    reference.eval()
++    ids, mask = fixed_batch(rank, device, reference.config.vocab_size)
+     count = (mask[:, 1:] * mask[:, :-1]).sum()
+     dist.all_reduce(count)
+     total_tokens = int(count.item())
+-    print(f"[model-check rank={rank}] loading unsharded reference", flush=True)
+-    reference = load_model(args.hf_checkpoint, torch.bfloat16).to(device)
+-    if reference.config.attention_dropout != 0:
+-        raise ValueError("Deterministic model validation requires attention_dropout=0")
+     ref_logits = reference(input_ids=ids, attention_mask=mask, use_cache=False).logits
+     ref_sum, _ = causal_loss_sum(ref_logits, ids, mask)
+     globally_normalized_loss(ref_sum, total_tokens, world).backward()
+@@ -105,9 +105,15 @@ def check_model(args):
+         reference_grads[name] = grad.cpu()
+         parameter.grad = None
+     reference.to(device="cpu", dtype=torch.float32)
+-    initial = {name: parameter.detach().clone() for name, parameter in reference.named_parameters()}
+-    for name, parameter in reference.named_parameters():
+-        parameter.grad = reference_grads[name]
++    # AdamW applies BF16-compute gradients to the independent original FP32
++    # weights. Recovering the master by upcasting BF16 would lose init bits.
++    reference_master = load_model(args, torch.float32)
++    initial = {name: parameter.detach().clone() for name, parameter in reference_master.named_parameters()}
++    del reference_master
++    with torch.no_grad():
++        for name, parameter in reference.named_parameters():
++            parameter.copy_(initial[name])
++            parameter.grad = reference_grads[name]
+     # FP64 accumulation keeps the CPU oracle accurate for the large embedding.
+     ref_norm = math.sqrt(sum(grad.square().sum(dtype=torch.float64).item()
+                              for grad in reference_grads.values()))
+@@ -121,8 +127,9 @@ def check_model(args):
+     del ref_optimizer
+     gc.collect()
+     print(f"[model-check rank={rank}] loading FP32 master weights and wrapping FSDP", flush=True)
+-    model = load_model(args.hf_checkpoint, torch.float32)
+-    turbo = wrap_model(model, world)
++    model = load_model(args, torch.float32)
++    turbo = wrap_model(model, world, args)
++    turbo.eval()
+     parameters = dict(model.named_parameters())
+     if set(parameters) != set(initial):
+         raise ValueError("Wrapping changed unique parameter names")
+@@ -181,8 +188,8 @@ def check_model(args):
+     checks = {
+         "initial_exact": metrics["initial_weights"]["max_abs"] == 0,
+         "half_parameter_storage": local_numel * world == global_numel,
+-        "decoder_and_root_units": units == model.config.num_hidden_layers + 1,
+-        "tied_embeddings": not model.config.tie_word_embeddings or tied,
++        "decoder_and_root_units": units == len(turbo.config.distributed.fsdp_plan.apply_modules) + 1,
++        "tied_embeddings": not getattr(model.config, "tie_word_embeddings", False) or tied,
+         "fp32_master_and_gradients": all(p.dtype == p.grad.dtype == torch.float32 for p in parameters.values()),
+         "optimizer_states_sharded": optimizer_sharded and len(optimizer.state) == len(parameters),
+         "logits": metrics["logits"]["relative_l2"] <= limits["logits_relative_l2"],
+diff --git a/slime/backends/fsdp_utils/preflight.py b/slime/backends/fsdp_utils/preflight.py
+index 163489ee..0b67bc8d 100644
+--- a/slime/backends/fsdp_utils/preflight.py
++++ b/slime/backends/fsdp_utils/preflight.py
+@@ -55,7 +55,7 @@ def run_initialization_check(args):
+                   "ranks": ranks, "serving_environment": serving_state, "shutdown": shutdown}
+         if models is not None:
+             result.update(passed=all(item["passed"] for item in models),
+-                          scope="Qwen3 masked CE forward/backward/AdamW validation; no GRPO or generation",
++                          scope="Causal LM masked CE forward/backward/AdamW validation",
+                           models=models)
+         if grpo is not None:
+             result.update(passed=all(item["validation"]["passed"] for item in grpo["ranks"]),
+diff --git a/slime/backends/fsdp_utils/trainer.py b/slime/backends/fsdp_utils/trainer.py
+index c4f5b17f..b9aaec0f 100644
+--- a/slime/backends/fsdp_utils/trainer.py
++++ b/slime/backends/fsdp_utils/trainer.py
+@@ -1,16 +1,15 @@
+-"""FSDPTurbo GRPO updates consuming Slime's existing rollout batch contract."""
++"""FSDPTurbo policy updates consuming Slime's rollout batch contract."""
+ 
+ import math
+ 
+ import torch
+ import torch.distributed as dist
+-from torch.distributed.fsdp import FSDPModule
+ 
+ from slime.utils import accelerator
+ from slime.utils.distributed_utils import get_gloo_group
+ 
+-from .grpo import collate, microbatch_loss, response_log_probs, validate_batch
+-from .model import load_model, wrap_model
++from .loss import collate, microbatch_loss, response_log_probs, validate_batch
++from .model import load_model, reshard_model, wrap_model
+ 
+ 
+ def collective_validate(data, args, vocab_size):
+@@ -25,7 +24,7 @@ def collective_validate(data, args, vocab_size):
+     errors = [None] * dist.get_world_size()
+     dist.all_gather_object(errors, error, group=get_gloo_group())
+     if any(errors):
+-        raise ValueError(f"Invalid distributed GRPO batch: {errors}")
++        raise ValueError(f"Invalid distributed policy batch: {errors}")
+     plan = {key: data[key] for key in ("partition", "num_microbatches", "global_batch_sizes",
+                                       "micro_batch_indices", "rollout_ids", "rollout_mask_sums", "rewards")}
+     plan["mask_sums"] = [int(torch.as_tensor(mask).sum()) for mask in data["loss_masks"]]
+@@ -39,12 +38,15 @@ def collective_validate(data, args, vocab_size):
+         raise ValueError("Training ranks received overlapping sample partitions")
+     offset = 0
+     seen_rollouts = set()
++    require_complete_rollouts = args.advantage_estimator == "gspo"
+     for count, global_size in zip(plan["num_microbatches"], plan["global_batch_sizes"], strict=True):
+         totals, reported, rewards = {}, {}, {}
+         for p in plans:
+             for mb in p["micro_batch_indices"][offset:offset + count]:
+                 for i in mb:
+                     rid = p["rollout_ids"][i]
++                    if require_complete_rollouts and (rid in totals or rid in seen_rollouts):
++                        raise ValueError("GSPO requires complete responses; segmented rollouts are unsupported")
+                     totals[rid] = totals.get(rid, 0) + p["mask_sums"][i]
+                     denominator = float(p["rollout_mask_sums"][i])
+                     if rid in reported and reported[rid] != denominator:
+@@ -67,30 +69,28 @@ def make_optimizer(parameters, args):
+ 
+ 
+ def clip_sharded_gradients(model, max_norm):
+-    norm2 = torch.zeros((), device=accelerator.device())
+-    for parameter in model.parameters():
+-        if parameter.grad is None:
+-            raise ValueError("GRPO backward left a parameter without a gradient")
+-        norm2 += parameter.grad.to_local().float().square().sum()
+-    # This backend fixes replica-DP=1; every unique shard contributes once.
+-    dist.all_reduce(norm2)
+-    norm = norm2.sqrt().item()
++    from fsdp_turbo.training.clip_grads import clip_grad_by_norm, compute_grad_norm
++
++    parameters = list(model.parameters())
++    if any(parameter.grad is None for parameter in parameters):
++        raise ValueError("Policy backward left a parameter without a gradient")
++    norm = compute_grad_norm(parameters)
+     if not math.isfinite(norm):
+-        raise ValueError("Nonfinite GRPO gradient norm; optimizer step cancelled")
+-    scale = min(1.0, max_norm / (norm + 1e-6)) if max_norm > 0 else 1.0
+-    for parameter in model.parameters():
+-        parameter.grad.mul_(scale)
++        raise ValueError("Nonfinite policy gradient norm; optimizer step cancelled")
++    clip_grad_by_norm(parameters, max_norm, norm)
+     return norm
+ 
+ 
+-class GRPOTrainer:
++class FSDPTrainer:
+     def __init__(self, args):
+         from fsdp_turbo.utils.device import set_accelerator_compatible
+ 
+-        set_accelerator_compatible()
++        backend = set_accelerator_compatible()
++        if accelerator.device_type() == "npu" and backend != "hccl":
++            raise RuntimeError("FSDPTurbo did not select the Ascend HCCL runtime")
+         self.args = args
+-        self.model = load_model(args.hf_checkpoint, torch.float32)
+-        self.turbo = wrap_model(self.model, dist.get_world_size())
++        self.model = load_model(args)
++        self.turbo = wrap_model(self.model, dist.get_world_size(), args)
+         self.optimizer = make_optimizer(self.model.parameters(), args)
+         self.optimizer_steps = 0
+         self.last_rollout_id = None
+@@ -104,21 +104,21 @@ class GRPOTrainer:
+     def train_batch(self, rollout_id, data, observer=None):
+         args, world = self.args, dist.get_world_size()
+         collective_validate(data, args, self.model.config.vocab_size)
+-        self.turbo.train()
+         # Freeze old-policy logprobs for the ENTIRE rollout before any updates.
+-        if args.use_rollout_logprobs:
+-            old = [torch.as_tensor(value).float().detach().clone() for value in data["rollout_log_probs"]]
+-        else:
+-            old = [None] * len(data["tokens"])
+-            with torch.no_grad():
+-                for indices in data["micro_batch_indices"]:
+-                    for i, value in zip(indices, self._forward(data, indices), strict=True):
+-                        old[i] = value.detach().cpu().clone()
+-        # A no-grad forward can leave root parameters gathered. Return to FP32
+-        # shards before inspecting master weights or starting the training pass.
+-        for module in self.model.modules():
+-            if isinstance(module, FSDPModule):
+-                module.reshard()
++        try:
++            if args.use_rollout_logprobs:
++                old = [torch.as_tensor(value).float().detach().clone() for value in data["rollout_log_probs"]]
++            else:
++                old = [None] * len(data["tokens"])
++                self.turbo.eval()
++                with torch.no_grad():
++                    for indices in data["micro_batch_indices"]:
++                        for i, value in zip(indices, self._forward(data, indices), strict=True):
++                            old[i] = value.detach().cpu().clone()
++        finally:
++            self.turbo.train()
++            # A no-grad forward can leave root parameters gathered.
++            reshard_model(self.model)
+         if observer is not None:
+             observer.check_old(old)
+         offset = 0
+@@ -140,7 +140,7 @@ class GRPOTrainer:
+             dist.all_reduce(metrics)
+             metrics /= global_size
+             if not torch.isfinite(metrics).all():
+-                raise ValueError("Nonfinite GRPO metrics; optimizer step cancelled")
++                raise ValueError("Nonfinite policy metrics; optimizer step cancelled")
+             if observer is not None:
+                 observer.check_gradients(step, self.model)
+             grad_norm = clip_sharded_gradients(self.model, args.clip_grad)
+diff --git a/slime/backends/fsdp_utils/weight_sync.py b/slime/backends/fsdp_utils/weight_sync.py
+index 46b09e4c..ae7fd4e3 100644
+--- a/slime/backends/fsdp_utils/weight_sync.py
++++ b/slime/backends/fsdp_utils/weight_sync.py
+@@ -8,11 +8,11 @@ from pathlib import Path
+ 
+ import torch
+ import torch.distributed as dist
+-from torch.distributed.fsdp import FSDPModule
+ from torch.distributed.tensor import DTensor
+ 
+ from slime.utils.distributed_utils import get_gloo_group
+ 
++from .model import reshard_model, tied_embeddings
+ 
+ def root_action(action):
+     """Propagate rank-zero filesystem failures before the next model collective."""
+@@ -40,13 +40,18 @@ def write_snapshot(model, state, source, destination, version, optimizer_steps):
+     try:
+         # Explicit cloning handles the tied embedding/head safetensors alias.
+         state = {name: tensor.contiguous().clone() for name, tensor in state.items()}
+-        if model.config.tie_word_embeddings:
+-            if not torch.equal(state["model.embed_tokens.weight"], state["lm_head.weight"]):
++        if getattr(model.config, "tie_word_embeddings", False):
++            if not tied_embeddings(model):
++                raise ValueError("Model lost its tied input and output embeddings")
++            shared = model.get_input_embeddings().weight
++            names = [name for name, parameter in model.named_parameters(remove_duplicate=False) if parameter is shared]
++            if not names or any(not torch.equal(state[names[0]], state[name]) for name in names[1:]):
+                 raise ValueError("Export lost tied embedding/head equality")
+         save_file(state, str(temporary / "model.safetensors"), metadata={"format": "pt"})
+         model.config.save_pretrained(temporary)
+         for name in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
+-                     "generation_config.json", "vocab.json", "merges.txt", "chat_template.jinja"):
++                     "generation_config.json", "vocab.json", "merges.txt", "chat_template.jinja",
++                     "tokenizer.model", "spiece.model", "added_tokens.json"):
+             path = Path(source) / name
+             if path.is_file():
+                 shutil.copyfile(path, temporary / name)
+@@ -68,16 +73,15 @@ def export_weights(trainer, version):
+     model, args = trainer.model, trainer.args
+     target = Path(args.update_weight_disk_dir) / f"weight_v{version:06d}"
+     root_action(lambda: _check_destination(target))
+-    for module in model.modules():
+-        if isinstance(module, FSDPModule):
+-            module.reshard()
++    reshard_model(model)
+     state = {}
+     # All ranks take part in each gather. Only rank zero retains CPU tensors.
+     # Keep HF names unchanged, as in Miles' FSDP HF weight iterator.
+     for name, value in model.state_dict().items():
+         full = value.full_tensor() if isinstance(value, DTensor) else value
+         if dist.get_rank() == 0:
+-            state[name] = full.to(dtype=torch.bfloat16, device="cpu").clone()
++            dtype = torch.bfloat16 if full.is_floating_point() else full.dtype
++            state[name] = full.to(dtype=dtype, device="cpu").clone()
+         del full
+     return root_action(lambda: write_snapshot(model, state, args.hf_checkpoint, target,
+                                               version, trainer.optimizer_steps))
+diff --git a/tests/test_fsdp_entry.py b/tests/test_fsdp_entry.py
+index a246e124..f8fdc548 100644
+--- a/tests/test_fsdp_entry.py
++++ b/tests/test_fsdp_entry.py
+@@ -2,6 +2,7 @@
+ 
+ import importlib.abc
+ import sys
++from types import ModuleType
+ 
+ import pytest
+ 
+@@ -92,3 +93,58 @@ def test_grpo_check_parser_and_rejections(cli, tmp_path, extra):
+             parse_args()
+     else:
+         assert parse_args().fsdp_grpo_check
++
++
++@pytest.mark.parametrize(
++    "random_init,estimator,train_devices,rollout_devices,devices_per_engine",
++    [
++        (False, "gspo", 4, 2, 2),
++        (True, "cispo", 6, 4, 2),
++    ],
++)
++def test_sync_model_sources_and_topology(
++    monkeypatch, tmp_path, random_init, estimator, train_devices, rollout_devices, devices_per_engine
++):
++    # Exercise the driver's CLI wiring without importing the NPU serving runtime.
++    serving = ModuleType("slime.backends.sglang_utils.arguments")
++
++    def serving_args(parser):
++        parser.set_defaults(sglang_dp_size=1, sglang_pp_size=1, sglang_load_format="auto")
++        return parser
++
++    def validate_serving(args):
++        args.sglang_tp_size = args.rollout_num_gpus_per_engine
++
++    serving.add_sglang_arguments = serving_args
++    serving.validate_args = validate_serving
++    monkeypatch.setitem(sys.modules, serving.__name__, serving)
++    assets = tmp_path / "hf"
++    assets.mkdir()
++    config = assets / "config.json"
++    config.write_text('{"model_type": "llama"}')
++    prompts = tmp_path / "prompts.jsonl"
++    prompts.write_text('{"prompt": "hello"}\n')
++    argv = [
++        "train.py", "--train-backend", "fsdp", "--fsdp-sync-train",
++        "--actor-num-gpus-per-node", str(train_devices), "--num-gpus-per-node", str(train_devices + rollout_devices),
++        "--rollout-num-gpus", str(rollout_devices), "--rollout-num-gpus-per-engine", str(devices_per_engine),
++        "--rollout-batch-size", str(train_devices), "--global-batch-size", str(train_devices * 2),
++        "--save", str(tmp_path / "training"), "--save-interval", "1", "--num-rollout", "1",
++        "--prompt-data", str(prompts), "--update-weight-transport", "disk",
++        "--rollout-top-k", "-1", "--rollout-top-p", "1",
++        "--update-weight-disk-dir", str(tmp_path / "weights"), "--update-weight-disk-keep-files",
++        "--flush-cache-interval", "1", "--advantage-estimator", estimator,
++    ]
++    argv += ["--fsdp-random-init", "--fsdp-model-config", str(config)] if random_init else ["--hf-checkpoint", str(assets)]
++    if estimator == "cispo":
++        argv.extend(["--eps-clip", "1.0", "--eps-clip-high", "0.2"])
++    monkeypatch.setattr(sys, "argv", argv)
++    args, _ = parse_args(return_restore_plan=True)
++
++    assert args.fsdp_random_init == random_init
++    assert args.hf_checkpoint == str(assets)
++    assert args.sglang_load_format == ("dummy" if random_init else "auto")
++    assert args.advantage_estimator == estimator
++    assert args.actor_num_gpus_per_node == train_devices
++    assert args.rollout_num_gpus == rollout_devices
++    assert args.sglang_tp_size == devices_per_engine
+diff --git a/tests/test_fsdp_grpo.py b/tests/test_fsdp_grpo.py
+index 24813869..b188b590 100644
+--- a/tests/test_fsdp_grpo.py
++++ b/tests/test_fsdp_grpo.py
+@@ -1,4 +1,4 @@
+-"""GRPO contract tests, executable on CPU without importing FSDPTurbo."""
++"""FSDP policy contract tests, executable on CPU without FSDPTurbo."""
+ 
+ from copy import deepcopy
+ from types import SimpleNamespace
+@@ -6,8 +6,7 @@ from types import SimpleNamespace
+ import pytest
+ import torch
+ 
+-from slime.backends.fsdp_utils.grpo import (clipped_policy_loss, collate, microbatch_loss,
+-                                           response_log_probs, validate_batch)
++from slime.backends.fsdp_utils.loss import clipped_policy_loss, collate, microbatch_loss, response_log_probs, validate_batch
+ 
+ 
+ def batch():
+@@ -18,8 +17,9 @@ def batch():
+             "micro_batch_indices": [[0], [1]], "num_microbatches": [2], "global_batch_sizes": [1]}
+ 
+ 
+-def args():
+-    return SimpleNamespace(eps_clip=0.2, eps_clip_high=0.3, eps_clip_c=None)
++def args(estimator="grpo"):
++    return SimpleNamespace(advantage_estimator=estimator, pg_loss_type=None,
++                           eps_clip=0.2, eps_clip_high=0.3, eps_clip_c=None)
+ 
+ 
+ def test_response_alignment_temperature_and_padding():
+@@ -55,6 +55,44 @@ def test_clipping_branches_and_detached_old_advantage(advantage, dual):
+     assert new.grad[3 if advantage > 0 else 0] == 0
+ 
+ 
++@pytest.mark.parametrize("estimator", ["grpo", "gspo", "cispo"])
++def test_masked_policy_objectives_match_independent_values_and_gradients(estimator):
++    new = [torch.tensor([-0.1, -0.8, -1.4], requires_grad=True), torch.tensor([-1.2, -0.1], requires_grad=True)]
++    old = [torch.tensor([-0.5, -5.0, -1.55], requires_grad=True), torch.tensor([-1.0, -0.3], requires_grad=True)]
++    masks = [torch.tensor([1., 0., 1.]), torch.tensor([1., 1.])]
++    rewards = [1.3, -0.7]
++    data = {"loss_masks": masks, "rewards": rewards, "rollout_mask_sums": [2, 2]}
++    loss, metrics = microbatch_loss(args(estimator), data, [0, 1], new, old)
++
++    expected_loss = loss.new_zeros(())
++    expected_clip = loss.new_zeros(())
++    expected_kl = loss.new_zeros(())
++    for current, previous, mask, reward in zip(new, old, masks, rewards, strict=True):
++        delta = current - previous.detach()
++        if estimator == "gspo":
++            delta = delta[mask.bool()].mean().expand_as(current)
++        ratio = delta.exp()
++        bound = ratio.clamp(0.8, 1.3)
++        if estimator == "cispo":
++            token_loss = -bound.detach() * reward * current
++            clipped = ratio != bound
++        else:
++            token_loss = -torch.minimum(ratio * reward, bound * reward)
++            clipped = bound * reward < ratio * reward
++        expected_loss += (token_loss * mask).sum() / 2
++        expected_clip += (clipped * mask).sum() / 2
++        expected_kl += (-delta.detach() * mask).sum() / 2
++    torch.testing.assert_close(loss, expected_loss)
++    torch.testing.assert_close(metrics, torch.stack((expected_loss.detach(), expected_clip, expected_kl)))
++    loss.backward()
++    for current, expected in zip(new, torch.autograd.grad(expected_loss, new), strict=True):
++        torch.testing.assert_close(current.grad, expected)
++    assert all(previous.grad is None for previous in old)
++    assert new[0].grad[1] == 0  # Masked token affects neither loss nor GSPO's sequence ratio.
++    if estimator == "cispo":
++        assert new[0].grad[0] != 0  # A clipped CISPO ratio still contributes a policy gradient.
++
++
+ def test_segment_denominator_and_microbatch_accumulation():
+     data = batch()
+     parameter = torch.tensor(0.0, requires_grad=True)
+@@ -99,7 +137,7 @@ def test_collective_batch_validation(monkeypatch, defect):
+     from slime.backends.fsdp_utils import trainer as module
+ 
+     data = batch()
+-    config = SimpleNamespace(use_rollout_logprobs=False)
++    config = SimpleNamespace(use_rollout_logprobs=False, advantage_estimator="grpo")
+     monkeypatch.setattr(module.dist, "get_world_size", lambda: 2)
+     monkeypatch.setattr(module, "get_gloo_group", lambda: None)
+     def gather(output, value, group):
+@@ -125,6 +163,31 @@ def test_collective_batch_validation(monkeypatch, defect):
+         module.collective_validate(data, config, 5)
+ 
+ 
++@pytest.mark.parametrize("segmented", [False, True])
++def test_gspo_requires_complete_rollouts_across_ranks(monkeypatch, segmented):
++    from slime.backends.fsdp_utils import trainer as module
++
++    data = {
++        "tokens": [[1, 2]], "response_lengths": [1], "total_lengths": [2], "loss_masks": [[1]], "rewards": [1.0],
++        "rollout_ids": [0], "rollout_mask_sums": [2 if segmented else 1], "partition": [0],
++        "micro_batch_indices": [[0]], "num_microbatches": [1], "global_batch_sizes": [1 if segmented else 2],
++    }
++    config = SimpleNamespace(use_rollout_logprobs=False, advantage_estimator="gspo")
++    monkeypatch.setattr(module.dist, "get_world_size", lambda: 2)
++    monkeypatch.setattr(module, "get_gloo_group", lambda: None)
++
++    def gather(output, value, group):
++        remote = {**value, "partition": [1], "rollout_ids": [0 if segmented else 1]} if value is not None else None
++        output[:] = [value, remote]
++
++    monkeypatch.setattr(module.dist, "all_gather_object", gather)
++    if segmented:
++        with pytest.raises(ValueError, match="GSPO requires complete responses"):
++            module.collective_validate(data, config, 5)
++    else:
++        module.collective_validate(data, config, 5)
++
++
+ def builder_args():
+     return SimpleNamespace(custom_reward_post_process_path=None, custom_convert_samples_to_train_data_path=None,
+                            advantage_estimator="grpo", rewards_normalization=True, grpo_std_normalization=True,
+@@ -150,6 +213,28 @@ def test_real_batch_builder_normalizes_unique_rollouts_once():
+     assert BatchBuilder(builder_args()).convert(samples[:1])["rewards"] == [0.0]
+ 
+ 
++def test_turbo_gradient_clipping_supports_local_tensors_and_preserves_guards():
++    pytest.importorskip("fsdp_turbo.training.clip_grads")
++    from slime.backends.fsdp_utils.trainer import clip_sharded_gradients
++
++    model = torch.nn.Linear(2, 1, bias=False)
++    gradient = torch.tensor([[3.0, 4.0]])
++    model.weight.grad = gradient.clone()
++    assert clip_sharded_gradients(model, max_norm=0.0) == pytest.approx(5.0)
++    torch.testing.assert_close(model.weight.grad, gradient)
++    assert clip_sharded_gradients(model, max_norm=1.0) == pytest.approx(5.0)
++    torch.testing.assert_close(model.weight.grad, gradient / (5.0 + 1e-6))
++
++    model.weight.grad[0, 0] = float("inf")
++    with pytest.raises(ValueError, match="Nonfinite policy gradient norm"):
++        clip_sharded_gradients(model, max_norm=1.0)
++    assert torch.isinf(model.weight.grad[0, 0])
++
++    model.weight.grad = None
++    with pytest.raises(ValueError, match="without a gradient"):
++        clip_sharded_gradients(model, max_norm=1.0)
++
++
+ @pytest.mark.parametrize("supplied", [False, True])
+ def test_old_policy_is_frozen_across_steps_and_optimizer_persists(monkeypatch, supplied):
+     from slime.backends.fsdp_utils import trainer as module
+@@ -157,7 +242,7 @@ def test_old_policy_is_frozen_across_steps_and_optimizer_persists(monkeypatch, s
+     model = torch.nn.Linear(1, 1, bias=False)
+     model.weight.data.zero_()
+     model.config = SimpleNamespace(vocab_size=5)
+-    instance = module.GRPOTrainer.__new__(module.GRPOTrainer)
++    instance = module.FSDPTrainer.__new__(module.FSDPTrainer)
+     instance.model = instance.turbo = model
+     instance.args = args()
+     instance.args.use_rollout_logprobs = supplied
+@@ -167,7 +252,7 @@ def test_old_policy_is_frozen_across_steps_and_optimizer_persists(monkeypatch, s
+     instance.optimizer_steps = 0
+     calls = []
+     def forward(data, indices):
+-        calls.append(torch.is_grad_enabled())
++        calls.append((torch.is_grad_enabled(), model.training))
+         return [model.weight.flatten().expand(data["response_lengths"][i]) for i in indices]
+     instance._forward = forward
+     monkeypatch.setattr(module, "collective_validate", lambda *unused: None)
+@@ -181,7 +266,7 @@ def test_old_policy_is_frozen_across_steps_and_optimizer_persists(monkeypatch, s
+         data["rollout_log_probs"] = [torch.zeros(2), torch.zeros(1)]
+     result = instance.train_batch(0, data)
+     assert result["optimizer_steps"] == 2
+-    assert calls == ([True, True] if supplied else [False, False, True, True])
++    assert calls == ([(True, True)] * 2 if supplied else [(False, False)] * 2 + [(True, True)] * 2)
+     assert result["steps"][0]["loss"] == pytest.approx(-1)
+     assert result["steps"][1]["loss"] == pytest.approx(-torch.exp(torch.tensor(0.1)).item())
+     assert model.weight.item() == pytest.approx(0.1 + 0.1 * torch.exp(torch.tensor(0.1)).item())
+diff --git a/tests/test_fsdp_model.py b/tests/test_fsdp_model.py
+index 24950345..7796d999 100644
+--- a/tests/test_fsdp_model.py
++++ b/tests/test_fsdp_model.py
+@@ -1,10 +1,14 @@
+-"""Test masking and global-token normalization independently of FSDPTurbo."""
++"""Test local HF construction, FSDP wrap selection and fixed-oracle masking."""
++
++from fnmatch import fnmatchcase
++from types import SimpleNamespace
+ 
+ import pytest
+ import torch
+ import torch.nn.functional as F
++from transformers import GPT2Config
+ 
+-from slime.backends.fsdp_utils.model import load_model
++from slime.backends.fsdp_utils.model import _wrap_units, load_model, tied_embeddings
+ from slime.backends.fsdp_utils.model_check import causal_loss_sum, globally_normalized_loss
+ 
+ 
+@@ -35,7 +39,32 @@ def test_loading_requires_local_checkpoint(tmp_path):
+         load_model(tmp_path, torch.float32)
+ 
+ 
+-def test_loading_rejects_unvalidated_architecture(tmp_path):
+-    (tmp_path / "config.json").write_text('{"model_type": "gpt2"}')
+-    with pytest.raises(ValueError, match="Unsupported HuggingFace model type"):
+-        load_model(tmp_path, torch.float32)
++def test_random_config_is_reproducible_and_loads_as_local_pretrained(tmp_path):
++    def match_pattern(pattern, name):
++        return fnmatchcase(name, pattern)
++
++    config = GPT2Config(vocab_size=17, n_embd=16, n_layer=2, n_head=2, bos_token_id=1, eos_token_id=2)
++    random_config = tmp_path / "tiny-gpt2.json"
++    config.to_json_file(random_config)
++    args = SimpleNamespace(fsdp_random_init=True, fsdp_model_config=random_config, seed=123)
++    rng = torch.random.get_rng_state()
++    master = load_model(args)
++    compute = load_model(args, torch.bfloat16)
++    assert torch.equal(rng, torch.random.get_rng_state())
++    assert tied_embeddings(master)
++    assert tied_embeddings(compute)
++    for a, b in zip(master.parameters(), compute.parameters(), strict=True):
++        torch.testing.assert_close(a.bfloat16(), b, rtol=0, atol=0)
++    assert _wrap_units(master) == ["transformer.h.0", "transformer.h.1"]
++    with pytest.raises(ValueError, match="split a shared parameter"):
++        _wrap_units(master, ["transformer.wte"], match=match_pattern)
++    with pytest.raises(ValueError, match="did not match a submodule"):
++        _wrap_units(master, ["does-not-exist"], match=match_pattern)
++    with pytest.raises(ValueError, match="Nested"):
++        _wrap_units(master, ["transformer.h.0*"], match=match_pattern)
++    checkpoint = tmp_path / "checkpoint"
++    master.save_pretrained(checkpoint)
++    restored = load_model(checkpoint, torch.float32)
++    assert tied_embeddings(restored)
++    for a, b in zip(master.parameters(), restored.parameters(), strict=True):
++        torch.testing.assert_close(a, b, rtol=0, atol=0)
+diff --git a/tests/test_fsdp_weight_sync.py b/tests/test_fsdp_weight_sync.py
+index 634ff54e..00058629 100644
+--- a/tests/test_fsdp_weight_sync.py
++++ b/tests/test_fsdp_weight_sync.py
+@@ -16,31 +16,47 @@ class Config:
+         (path / "config.json").write_text('{"model_type":"qwen3","tie_word_embeddings":true}')
+ 
+ 
++class TiedModel(torch.nn.Module):
++    config = Config()
++
++    def __init__(self):
++        super().__init__()
++        self.input_embedding = torch.nn.Embedding(4, 3)
++        self.output_head = torch.nn.Linear(3, 4, bias=False)
++        self.output_head.weight = self.input_embedding.weight
++
++    def get_input_embeddings(self):
++        return self.input_embedding
++
++    def get_output_embeddings(self):
++        return self.output_head
++
++
+ def test_export_preserves_tied_hf_names_without_alias(tmp_path):
+     source = tmp_path / "source"
+     source.mkdir()
+     (source / "tokenizer.json").write_text('{}')
+     tensor = torch.arange(12, dtype=torch.bfloat16).reshape(4, 3)
+     target = tmp_path / "weights/v1"
+-    state = {"model.embed_tokens.weight": tensor, "lm_head.weight": tensor}
+-    result = write_snapshot(SimpleNamespace(config=Config()), state, source, target, 1, 0)
++    state = {"input_embedding.weight": tensor, "output_head.weight": tensor}
++    result = write_snapshot(TiedModel(), state, source, target, 1, 0)
+     loaded = load_file(target / "model.safetensors")
+     assert set(loaded) == set(state)
+-    assert torch.equal(loaded["model.embed_tokens.weight"], loaded["lm_head.weight"])
+-    assert loaded["lm_head.weight"].dtype == torch.bfloat16
++    assert torch.equal(loaded["input_embedding.weight"], loaded["output_head.weight"])
++    assert loaded["output_head.weight"].dtype == torch.bfloat16
+     assert json.loads((target / "fsdp-publication.json").read_text()) == result
+     assert not result["resumable_training_checkpoint"]
+     assert not list(target.parent.glob(".v1-*"))
+     with pytest.raises(FileExistsError):
+-        write_snapshot(SimpleNamespace(config=Config()), state, source, target, 1, 0)
+-    assert load_file(target / "model.safetensors")["lm_head.weight"].equal(tensor)
++        write_snapshot(TiedModel(), state, source, target, 1, 0)
++    assert load_file(target / "model.safetensors")["output_head.weight"].equal(tensor)
+ 
+ 
+ def test_failed_export_never_publishes_partial_directory(tmp_path):
+     target = tmp_path / "v1"
+-    state = {"model.embed_tokens.weight": torch.zeros(2), "lm_head.weight": torch.ones(2)}
++    state = {"input_embedding.weight": torch.zeros(2), "output_head.weight": torch.ones(2)}
+     with pytest.raises(ValueError, match="tied"):
+-        write_snapshot(SimpleNamespace(config=Config()), state, tmp_path, target, 1, 0)
++        write_snapshot(TiedModel(), state, tmp_path, target, 1, 0)
+     assert not target.exists()
+     assert not list(tmp_path.glob(".v1-*"))
+ 
+diff --git a/train.py b/train.py
+index 5757da4a..b45fbd53 100644
+--- a/train.py
++++ b/train.py
+@@ -15,7 +15,7 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
+ 
+     actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
+     sync_report = None
+-    if getattr(args, "fsdp_sync_train", False):
++    if getattr(args, "fsdp_sync_train", False) and getattr(args, "fsdp_init_report", None) is not None:
+         from slime.backends.fsdp_utils.audit import SyncReport
+ 
+         sync_report = SyncReport(args, actor_model)
