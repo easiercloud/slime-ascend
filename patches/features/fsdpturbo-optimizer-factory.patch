@@ -1,0 +1,255 @@
+From 4ed2db9f8cd05b5124bf77bbcb9bfd1d82cd80d1 Mon Sep 17 00:00:00 2001
+From: yiweiyun <1223702268@qq.com>
+Date: Sat, 28 Nov 2026 17:46:37 +0800
+Subject: [PATCH] Reuse Turbo optimizer factory with Slime configuration and
+ parameter groups
+
+Signed-off-by: yiweiyun <1223702268@qq.com>
+---
+ slime/backends/fsdp_utils/arguments.py  | 21 ++++++++-
+ slime/backends/fsdp_utils/checkpoint.py | 24 ++++++++--
+ slime/backends/fsdp_utils/optimizer.py  | 62 +++++++++++++++++++++++++
+ slime/backends/fsdp_utils/trainer.py    | 13 ++----
+ 4 files changed, 107 insertions(+), 13 deletions(-)
+ create mode 100644 slime/backends/fsdp_utils/optimizer.py
+
+diff --git a/slime/backends/fsdp_utils/arguments.py b/slime/backends/fsdp_utils/arguments.py
+index 1fecc65d0a5760987b3bf80d80cef317c80bbcb7..d4e9a4cbb8647beb2e6850838cfbd3e08e115a99 100644
+--- a/slime/backends/fsdp_utils/arguments.py
++++ b/slime/backends/fsdp_utils/arguments.py
+@@ -1,6 +1,7 @@
+ """Parse FSDP configuration without importing the Megatron stack."""
+ 
+ import argparse
++import json
+ import math
+ import os
+ import sys
+@@ -9,6 +10,17 @@ from pathlib import Path
+ 
+ def validate_fsdp_args(args):
+     """Reject features that have not yet been integrated with this backend."""
++    from .optimizer import optimizer_config
++
++    optimizer = optimizer_config(args)
++    if not isinstance(optimizer["kwargs"], dict):
++        raise ValueError("--fsdp-optimizer-kwargs must be a JSON object")
++    if set(optimizer["kwargs"]) & {"params", "lr", "weight_decay"}:
++        raise ValueError("Set optimizer parameters, lr and weight decay through Slime options or parameter groups")
++    if any(getattr(args, name, False) for name in ("fsdp_model_check", "fsdp_grpo_check", "fsdp_checkpoint_check")):
++        if optimizer != {"type": "AdamW", "kwargs": {}, "param_groups": None, "provider": None}:
++            raise ValueError("Fixed acceptance fixtures require the default AdamW optimizer configuration")
++
+     model_check = getattr(args, "fsdp_model_check", False)
+     grpo_check = getattr(args, "fsdp_grpo_check", False)
+     online_check = getattr(args, "fsdp_online_check", False)
+@@ -117,7 +129,6 @@ def validate_fsdp_args(args):
+ 
+ def validate_policy_args(args):
+     from slime.utils.ppo_utils import get_pg_loss_type
+-
+     for name in (
+         "entropy_coef", "normalize_advantages", "calculate_per_token_loss", "use_tis",
+         "use_opsm", "get_mismatch_metrics", "use_score_centering", "use_dynamic_batch_size",
+@@ -186,6 +197,14 @@ def parse_fsdp_args(extra_args_provider):
+                         help="Training checkpoint root, separate from HF inference snapshots")
+     parser.add_argument("--fsdp-checkpoint-load", type=Path,
+                         help="Explicit committed iter directory; always restores optimizer and per-rank RNG")
++    parser.add_argument("--fsdp-optimizer-type", default="AdamW",
++                        help="Optimizer source passed to FSDPTurbo OptimizerFactory (torch.optim or registered name)")
++    parser.add_argument("--fsdp-optimizer-kwargs", type=json.loads, default=None,
++                        help="JSON constructor kwargs overriding optimizer-specific defaults; Slime owns lr and groups")
++    parser.add_argument("--fsdp-optimizer-param-groups",
++                        help="Optional function(model, args) returning torch optimizer parameter groups")
++    parser.add_argument("--fsdp-optimizer-provider",
++                        help="Optional constructor(param_groups, **kwargs) passed to Turbo as custom_fn")
+     parser.add_argument("--fsdp-adam-beta1", type=float, default=0.9)
+     parser.add_argument("--fsdp-adam-beta2", type=float, default=0.999)
+     parser.add_argument("--fsdp-adam-eps", type=float, default=1e-6)
+diff --git a/slime/backends/fsdp_utils/checkpoint.py b/slime/backends/fsdp_utils/checkpoint.py
+index 12fd32b0c0f19976d43f99d3d32d229c31274694..fe97dbd7a7c99c20ff70e5e47bbd0e56dd4ba40a 100644
+--- a/slime/backends/fsdp_utils/checkpoint.py
++++ b/slime/backends/fsdp_utils/checkpoint.py
+@@ -18,6 +18,7 @@ from slime.utils import accelerator
+ from slime.utils.distributed_utils import get_gloo_group
+ 
+ from .model import reshard_model
++from .optimizer import optimizer_config, optimizer_signature
+ 
+ FORMAT = "slime-fsdpturbo-training-v1"
+ POLICY_FIELDS = ("lr", "fsdp_adam_beta1", "fsdp_adam_beta2", "fsdp_adam_eps",
+@@ -79,6 +80,9 @@ def signature(trainer):
+         value["parallelism"]["wrap_modules"] = trainer.args.fsdp_wrap_modules
+     if getattr(trainer.args, "fsdp_model_provider", None):
+         value["model_provider"] = trainer.args.fsdp_model_provider
++    optimizer = optimizer_config(trainer.args)
++    if optimizer != {"type": "AdamW", "kwargs": {}, "param_groups": None, "provider": None}:
++        value["optimizer"] = optimizer
+     # HF configs can contain integer dictionary keys (id2label) and tuples.
+     # Compare the same JSON representation before and after persistence.
+     return json.loads(json.dumps(value, sort_keys=True))
+@@ -138,6 +142,7 @@ def save(trainer, directory, rollout_id, weight_version):
+             raise ValueError("Save requires a completed training rollout boundary")
+         return {"format": FORMAT, "signature": signature(trainer), "rollout_id": rollout_id,
+                 "next_rollout_id": rollout_id + 1, "optimizer_steps": trainer.optimizer_steps,
++                "optimizer": optimizer_signature(trainer.model, trainer.optimizer),
+                 "weight_version": weight_version, "scope": "trainer only; no rollout source or serving state"}
+ 
+     metadata = collective_action(boundary)
+@@ -192,12 +197,19 @@ def load(trainer, directory):
+     # Hash validation happens on rank zero before any DCP model collectives.
+     metadata = root_action(lambda: validate_manifest(directory, signature(trainer)))
+     collective_action(lambda: _validate_signature(metadata, signature(trainer)))
++    expected_optimizer = optimizer_signature(trainer.model, trainer.optimizer)
++    if "optimizer" in metadata:
++        collective_action(lambda: _validate_optimizer_signature(metadata["optimizer"], expected_optimizer))
+     rng = collective_action(lambda: torch.load(Path(directory) / f"rng-rank-{dist.get_rank()}.pt",
+                                               map_location="cpu", weights_only=True))
+     dcp.load({"training": TrainingState(trainer)}, checkpoint_id=str(Path(directory) / "state"))
+     trainer.optimizer_steps = metadata["optimizer_steps"]
+     trainer.last_rollout_id = metadata["rollout_id"]
+-    collective_action(lambda: _validate_optimizer(trainer))
++    if "optimizer" in metadata:
++        collective_action(lambda: _validate_optimizer_signature(
++            optimizer_signature(trainer.model, trainer.optimizer), expected_optimizer))
++    else:
++        collective_action(lambda: _validate_legacy_adam(trainer))
+     collective_action(lambda: restore_rng(rng))
+     return metadata
+ 
+@@ -207,8 +219,14 @@ def _validate_signature(metadata, expected):
+         raise ValueError("Training ranks disagree on checkpoint configuration")
+ 
+ 
+-def _validate_optimizer(trainer):
+-    params = list(trainer.model.parameters())
++def _validate_optimizer_signature(actual, expected):
++    if actual != expected:
++        raise ValueError("Optimizer class, parameter groups or settings differ from the checkpoint")
++
++
++def _validate_legacy_adam(trainer):
++    """Read checkpoints created before generic optimizer metadata was introduced."""
++    params = [parameter for parameter in trainer.model.parameters() if parameter.requires_grad]
+     if len(trainer.optimizer.state) != len(params):
+         raise ValueError("Incomplete optimizer state")
+     for parameter in params:
+diff --git a/slime/backends/fsdp_utils/optimizer.py b/slime/backends/fsdp_utils/optimizer.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ccc07fae1b9e2943a61dd8e2d0db3bbb3e818f29
+--- /dev/null
++++ b/slime/backends/fsdp_utils/optimizer.py
+@@ -0,0 +1,62 @@
++"""Adapt Slime optimizer configuration and named groups to Turbo's factory."""
++
++import json
++
++
++def optimizer_config(args):
++    """Resolve optimizer selection and extension hooks from Slime arguments."""
++    kwargs = getattr(args, "fsdp_optimizer_kwargs", None)
++    return {
++        "type": getattr(args, "fsdp_optimizer_type", "AdamW"),
++        "kwargs": {} if kwargs is None else kwargs,
++        "param_groups": getattr(args, "fsdp_optimizer_param_groups", None),
++        "provider": getattr(args, "fsdp_optimizer_provider", None),
++    }
++
++
++def parameter_groups(model, args):
++    """Materialize each trainable parameter exactly once in Slime-owned groups."""
++    from slime.utils.misc import load_function
++
++    provider = getattr(args, "fsdp_optimizer_param_groups", None)
++    groups = load_function(provider)(model, args) if provider else [{
++        "params": [parameter for parameter in model.parameters() if parameter.requires_grad],
++    }]
++    result, supplied = [], []
++    for group in groups:
++        group = dict(group)
++        group["params"] = list(group["params"])
++        group.setdefault("weight_decay", args.fsdp_weight_decay)
++        if group["params"]:
++            result.append(group)
++            supplied.extend(id(parameter) for parameter in group["params"])
++    expected = {id(parameter) for parameter in model.parameters() if parameter.requires_grad}
++    if not expected or set(supplied) != expected or len(supplied) != len(expected):
++        raise ValueError("Optimizer groups must contain each trainable model parameter exactly once")
++    return result
++
++
++def make_optimizer(model, args):
++    from fsdp_turbo.training.factories.optimizer_factory import OptimizerFactory
++    from slime.utils.misc import load_function
++
++    config = optimizer_config(args)
++    kwargs = {"lr": args.lr}
++    if config["provider"] is None and config["type"] in ("Adam", "AdamW"):
++        kwargs.update(betas=(args.fsdp_adam_beta1, args.fsdp_adam_beta2),
++                      eps=args.fsdp_adam_eps, foreach=False)
++    kwargs.update(config["kwargs"])
++    provider = load_function(config["provider"]) if config["provider"] else None
++    return OptimizerFactory.create(config["type"], parameter_groups(model, args), custom_fn=provider, **kwargs)
++
++
++def optimizer_signature(model, optimizer):
++    """Describe actual group membership and settings without optimizer-specific state keys."""
++    names = {id(parameter): name for name, parameter in model.named_parameters()}
++    groups = []
++    for group in optimizer.param_groups:
++        settings = {key: value for key, value in group.items() if key != "params"}
++        settings["params"] = [names[id(parameter)] for parameter in group["params"]]
++        groups.append(settings)
++    value = {"class": f"{type(optimizer).__module__}.{type(optimizer).__qualname__}", "groups": groups}
++    return json.loads(json.dumps(value, sort_keys=True))
+diff --git a/slime/backends/fsdp_utils/trainer.py b/slime/backends/fsdp_utils/trainer.py
+index b9aaec0f8e6b5ec63423d4822a908fccd26444ff..6ac088557dec4de499b520ef6eedf1fb1214d758 100644
+--- a/slime/backends/fsdp_utils/trainer.py
++++ b/slime/backends/fsdp_utils/trainer.py
+@@ -10,6 +10,7 @@ from slime.utils.distributed_utils import get_gloo_group
+ 
+ from .loss import collate, microbatch_loss, response_log_probs, validate_batch
+ from .model import load_model, reshard_model, wrap_model
++from .optimizer import make_optimizer
+ 
+ 
+ def collective_validate(data, args, vocab_size):
+@@ -62,16 +63,10 @@ def collective_validate(data, args, vocab_size):
+         offset += count
+ 
+ 
+-def make_optimizer(parameters, args):
+-    return torch.optim.AdamW(parameters, lr=args.lr,
+-                             betas=(args.fsdp_adam_beta1, args.fsdp_adam_beta2),
+-                             eps=args.fsdp_adam_eps, weight_decay=args.fsdp_weight_decay, foreach=False)
+-
+-
+ def clip_sharded_gradients(model, max_norm):
+     from fsdp_turbo.training.clip_grads import clip_grad_by_norm, compute_grad_norm
+ 
+-    parameters = list(model.parameters())
++    parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+     if any(parameter.grad is None for parameter in parameters):
+         raise ValueError("Policy backward left a parameter without a gradient")
+     norm = compute_grad_norm(parameters)
+@@ -91,7 +86,7 @@ class FSDPTrainer:
+         self.args = args
+         self.model = load_model(args)
+         self.turbo = wrap_model(self.model, dist.get_world_size(), args)
+-        self.optimizer = make_optimizer(self.model.parameters(), args)
++        self.optimizer = make_optimizer(self.model, args)
+         self.optimizer_steps = 0
+         self.last_rollout_id = None
+ 
+@@ -148,7 +143,7 @@ class FSDPTrainer:
+             self.optimizer_steps += 1
+             report = {"step": self.optimizer_steps, "loss": metrics[0].item(),
+                       "pg_clipfrac": metrics[1].item(), "ppo_kl": metrics[2].item(),
+-                      "grad_norm": grad_norm, "lr": args.lr, "global_rollouts": global_size,
++                      "grad_norm": grad_norm, "lr": self.optimizer.param_groups[0]["lr"], "global_rollouts": global_size,
+                       "microbatches_per_rank": count}
+             if observer is not None:
+                 observer.check_update(step, self.model, report)
+-- 
+2.39.5 (Apple Git-154)
+

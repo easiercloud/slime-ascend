@@ -21,7 +21,7 @@ flowchart TD
     Export --> Receiver["publication.py · 受管 SGLang 重载和版本回执"]
 ```
 
-合作分支的 Ray actor 注册、可选训练 Python、同步训练和 DCP/数据游标继续使用。FSDP 随实际 world size 分片，基类负责 NPU、WORLD 和 Gloo，训练器在已有 WORLD 上安装 Turbo 的 NPU 委托。训练参数由 Torch AdamW 在 FP32 主分片上更新。Torch 原生 FSDP2 负责参数与梯度并行。
+合作分支的 Ray actor 注册、可选训练 Python、同步训练和 DCP/数据游标继续使用。FSDP 随实际 world size 分片，基类负责 NPU、WORLD 和 Gloo，训练器在已有 WORLD 上安装 Turbo 的 NPU 委托。训练器通过 Turbo OptimizerFactory 创建选中的优化器，在 FP32 DTensor 主分片上更新。Torch 原生 FSDP2 负责参数与梯度并行。
 
 梯度范数与裁剪使用 FSDPTurbo 的 `compute_grad_norm()` 和 `clip_grad_by_norm()`。Slime 在计算范数前检查梯度是否齐全，在裁剪前检查范数是否有限。Turbo 根据 DTensor 的分片维度选择归约组。
 
@@ -33,7 +33,31 @@ flowchart TD
 - **分片扩展。** 默认从模型声明的 `_no_split_modules` 选分片模块。也可通过 `--fsdp-wrap-modules 'model.layers.{*}'` 提供 FSDPTurbo 路径。共享参数保持同一归属。
 - **卡数。** 在线例子可通过 `FSDP_TRAIN_DEVICES`、`FSDP_ROLLOUT_DEVICES` 和 `FSDP_DEVICES_PER_ENGINE` 设置训练卡、推理卡和 TP engine 的卡数。按实际 world size 配置 rollout batch、global batch 和 microbatch。在线路径目前为单节点训练和 TP-only SGLang，验收 fixture 自带其数值对照的固定规模。
 
-`config.json` 描述模型结构。HF 目录负责初始权重读取，推理快照写模型配置及 BF16 权重。续训使用 `--save` / `--load` 的 DCP 与数据游标，恢复训练参数、AdamW、RNG 和进度后，再发布新的 HF 版本。
+`config.json` 描述模型结构。HF 目录负责初始权重读取，推理快照写模型配置及 BF16 权重。续训使用 `--save` / `--load` 的 DCP 与数据游标，恢复训练参数、选中优化器的状态、RNG 和进度后，再发布新的 HF 版本。
+
+## 优化器扩展
+
+`fsdp_utils/optimizer.py` 将 Slime 配置与参数组适配到 FSDPTurbo 的 `OptimizerFactory.create()`。工厂可使用 `torch.optim` 中的类型、Turbo 已注册的名称，或自定义构造回调。
+
+| 选项 | 契约 |
+| --- | --- |
+| `--fsdp-optimizer-type` | 工厂 source 名称，默认 `AdamW`，也可选择 `Adam`、`SGD` 或已注册类型 |
+| `--fsdp-optimizer-kwargs` | JSON 对象，传递优化器专用构造参数，例如 SGD 的 momentum。lr、weight decay 与 params 由 Slime 选项和参数组管理 |
+| `--fsdp-optimizer-provider` | `constructor(param_groups, **kwargs)`，作为 Turbo 的 `custom_fn`，返回 Torch-compatible Optimizer |
+| `--fsdp-optimizer-param-groups` | `function(model, args)`，接收 FSDP2 wrap 后的 HF 根模型，返回参数组及各组的 lr、weight_decay 或优化器专用设置 |
+
+默认参数组包含全部可训练参数，每个参数出现一次。回调可以按模型名称和参数维度组织分组，排除 frozen 参数，并设置不同学习率或 decay。Adam/AdamW 的现有 beta、eps 参数继续映射到构造器，其他类型与自定义 provider 使用自己的 kwargs。当前学习率调度采用 constant。
+
+```bash
+--fsdp-optimizer-type Adam --fsdp-adam-beta1 0.9
+--fsdp-optimizer-type SGD --fsdp-optimizer-kwargs '{"momentum":0.9}'
+--fsdp-optimizer-type MyMuon --fsdp-optimizer-provider my_package.build_muon \
+  --fsdp-optimizer-param-groups my_package.muon_parameter_groups
+```
+
+Muon 等实现可通过上述回调和工厂注册入口扩展。算法的参数形状和分布式布局要求由对应实现满足。Torch 原生 Muon 只接受二维参数，完整语言模型的 Muon/辅助 optimizer 分组与 DTensor 实跑需要专项适配和验收。
+
+DCP 沿用选中优化器的通用 state_dict，不约束其状态必须包含 Adam moments。checkpoint 记录实际 optimizer class、参数组成员与设置，恢复前核对配置，恢复后核对参数组。已有默认 AdamW checkpoint 保持可读。固定数值验收 fixture 使用默认 AdamW oracle，通用优化器的回归脚本放在独立运行目录。
 
 ## 更新与发布
 

@@ -114,6 +114,16 @@ base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
 sha256 = "9957096257b3bb53ad6dbcc3dcc0990d76543c9a71e05773dd430bb649793845"
 
 [[patches]]
+id = "slime:features:fsdpturbo-optimizer-factory"
+category = "features"
+target = "slime"
+file = "fsdpturbo-optimizer-factory.patch"
+summary = "Reuse Turbo OptimizerFactory with Slime optimizer configuration, parameter groups and generic DCP metadata"
+issue = "local:fsdpturbo-optimizer-factory"
+base_commit = "18868a79b0b083a093798a94ed0f8cb4f71b9c14"
+sha256 = "4376039d2ddfe99e4e0d9c692afc2553e88cfad153e4bfc6608fafa1014f94d0"
+
+[[patches]]
 id = "mbridge:npu-device"
 category = "third_party"
 target = "mbridge"
